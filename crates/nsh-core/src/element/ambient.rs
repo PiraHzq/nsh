@@ -1463,6 +1463,14 @@ pub fn set_color_scheme(appearance: Appearance) {
     act(Action::Appearance(appearance));
 }
 
+/// Sets the app's own text size relative to the default (TS: an app overriding
+/// the platform's `fontScale()`). Text that allows font scaling is laid out
+/// again and components that read [`font_scale`] follow it: every text in the
+/// app scales by the same factor. Pass `1.0` to restore the normal size.
+pub fn set_font_scale(scale: f32) {
+    act(Action::FontScale(scale));
+}
+
 /// Draws the bar of every scroll view and list whose `scrollbar` is `true`
 /// with the built-in bar `source` makes of `theme` (the UI set's, which
 /// `source` gets back: [`BuiltInScrollbar::app_theme`](super::BuiltInScrollbar::app_theme)),

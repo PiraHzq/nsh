@@ -6492,6 +6492,17 @@ impl<M: TextEngine> Core<M> {
             Action::Hint(overlay) => self.hint_due(overlay),
             Action::Frame(answer) => self.wait_frame(answer),
             Action::Appearance(appearance) => self.set_appearance(appearance),
+            Action::FontScale(scale) => {
+                self.set_font_scale(scale);
+                // Components like the editors draw text themselves and read
+                // the environment's `font_scale`, not the core's multiplier.
+                // Keep both in sync so every text in the app scales alike.
+                let mut environment = self.components.environment.clone();
+                if environment.font_scale != scale {
+                    environment.font_scale = scale;
+                    self.apply_environment(environment);
+                }
+            }
             Action::Tokens(tokens) => self.set_tokens(tokens),
             Action::Translations(translations) => self.set_translations(translations),
             Action::AddTranslations(map) => self.add_translations(map),

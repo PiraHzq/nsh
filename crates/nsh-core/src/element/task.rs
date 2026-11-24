@@ -81,6 +81,10 @@ pub(crate) enum Action {
     /// Close the dialog whose answer resolves the slot, answering it as
     /// dismissed ([`DialogCloser::close`]).
     CloseDialog(Rc<RefCell<Output<DialogReply>>>),
+    /// Sets the app's own text-size multiplier (1.0 is the default). Text
+    /// that allows font scaling is laid out again; components that read
+    /// `font_scale()` also follow it.
+    FontScale(f32),
     /// The result of a module function JS waits for.
     Return(u32, super::JsResult),
     /// The pixel size of the image at the URI (its bytes stay loaded); the
