@@ -68,6 +68,10 @@ impl UreqNetwork {
         let agent = |redirects| {
             let config = Agent::config_builder()
                 .http_status_as_error(false)
+                // Allow extension methods such as WebDAV's PROPFIND/MKCOL.
+                // Without this, ureq rejects them with MethodVersionMismatch
+                // ("PROPFIND not valid for HTTP version HTTP/1.1").
+                .allow_non_standard_methods(true)
                 .tls_config(
                     ureq::tls::TlsConfig::builder()
                         .root_certs(ureq::tls::RootCerts::PlatformVerifier)
@@ -587,6 +591,23 @@ mod tests {
         assert_eq!(head.url, format!("{base}/path?q=1"));
         assert_eq!(values(&head.headers, "set-cookie"), ["a=1", "b=2"]);
         assert_eq!(body, b"nope");
+    }
+
+    #[test]
+    fn webdav_extension_methods_are_sent() {
+        // WebDAV (PROPFIND/MKCOL) uses extension methods. ureq rejects these by
+        // default with MethodVersionMismatch; the network agent opts in via
+        // allow_non_standard_methods(true). Verify a PROPFIND round-trips.
+        let base = serve(|s, _line, headers| {
+            assert_eq!(values(headers, "depth"), ["0"]);
+            respond(s, "207 Multi-Status", b"<?xml version=\"1.0\"?><D:multistatus xmlns:D=\"DAV:\"/>");
+        });
+        let mut r = request("PROPFIND", &base);
+        r.headers = vec![("Depth".into(), "0".into())];
+        let (_task, rx) = start(r);
+        let (head, body) = response(&rx);
+        assert_eq!(head.status, 207, "PROPFIND should reach the server and get 207");
+        assert!(String::from_utf8_lossy(&body).contains("DAV:"));
     }
 
     #[test]
