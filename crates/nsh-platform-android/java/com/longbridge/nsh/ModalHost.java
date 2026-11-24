@@ -550,9 +550,11 @@ final class ModalHost {
             int ime = keyboardHeight(insets);
             if (ime != keyboard) {
                 keyboard = ime;
-                int[] at = new int[2];
-                getLocationOnScreen(at);
-                mounter.keyboard(ime > 0 ? at[1] + getHeight() - ime : Integer.MAX_VALUE);
+                // The dialog window is resized above the IME and report()
+                // subtracts it from rootSize, so don't add a second keyboard
+                // padding to the scroll view (keyboard() would do that and
+                // push the focused field off the top). Just reveal focus.
+                mounter.keyboardForDialog(ime > 0);
                 // Shrink / grow the modal's layout area above the IME (see report).
                 requestLayout();
             }

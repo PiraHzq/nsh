@@ -475,7 +475,16 @@ impl PopupPresence {
 /// and `env(keyboard-inset-height)` does. Read in a style: a change of the
 /// keyboard's height moves the panel with the keyboard's own motion.
 pub(crate) fn keyboard_lift() -> Points {
-    (keyboard_height() - safe_area().bottom).max(Points::ZERO)
+    // Android 的软键盘会触发 window resize：NshView.onSizeChanged 把缩小后的
+    // 高度报给引擎，window().height 本身已经是键盘上方的可用高度。若这里再
+    // 抬升一段，底部面板会被顶到屏幕上半部，面板与键盘之间留出整块键盘高度
+    // 的空白（且是遮罩，点一下就关闭弹窗）。iOS / 桌面的键盘是覆盖层、窗口
+    // 尺寸不变，才需要这段抬升。
+    if cfg!(target_os = "android") {
+        Points::ZERO
+    } else {
+        (keyboard_height() - safe_area().bottom).max(Points::ZERO)
+    }
 }
 
 /// The tallest a panel docked to the bottom of the screen gets: below the

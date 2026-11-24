@@ -534,7 +534,10 @@ final class StackBox extends FrameLayout implements Node {
          * appearance, as `SystemUi`'s dialogs take, else the activity's theme.
          */
         private Context themed() {
-            if (mounter.appearance == 0) return getContext();
+            // The activity's theme is fixed at package time (Theme.Material.Light),
+            // so returning it for "follow system" renders a light header over a
+            // dark body. mounter.night() already resolves system uiMode when the
+            // app follows the system, so always wrap with the matching theme.
             return new android.view.ContextThemeWrapper(getContext(), mounter.night()
                     ? android.R.style.Theme_DeviceDefault
                     : android.R.style.Theme_DeviceDefault_Light);

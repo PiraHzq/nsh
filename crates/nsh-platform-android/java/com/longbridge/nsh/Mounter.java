@@ -3220,6 +3220,25 @@ final class Mounter {
     }
 
     /**
+     * A modal dialog's own window is resized above the software keyboard by
+     * ModalHost.report() (SOFT_INPUT_ADJUST_RESIZE), and its rootSize already
+     * has the IME subtracted. Its scroll views are therefore laid out above
+     * the keyboard already: adding contentPaddingBottom as keyboard() does for
+     * the main surface shrinks them a second time and pushes the focused field
+     * off the top of the panel. Clear any such padding and only reveal focus.
+     */
+    void keyboardForDialog(boolean keyboardVisible) {
+        if (avoided >= 0) {
+            View previous = views.get(avoided);
+            if (previous instanceof ScrollBox) ((ScrollBox) previous).setContentPaddingBottom(0);
+            avoided = -1;
+        }
+        shrinking = -1;
+        if (focused == null || !keyboardVisible) return;
+        host.post(this::revealFocused);
+    }
+
+    /**
      * Scroll view {@code scroll} got shorter: the one around the focused
      * input of a modal window that now lays out above the keyboard keeps the
      * input in sight.
