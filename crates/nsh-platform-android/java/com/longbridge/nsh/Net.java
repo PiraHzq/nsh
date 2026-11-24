@@ -3,7 +3,9 @@ package com.longbridge.nsh;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Field;
 import java.net.HttpURLConnection;
+import java.net.ProtocolException;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -105,7 +107,7 @@ final class Net {
             call.connection = c;
             if (call.cancelled) return;
             c.setInstanceFollowRedirects(follow);
-            c.setRequestMethod(method);
+            setMethod(c, method);
             c.setConnectTimeout(30_000);
             c.setReadTimeout(60_000);
             for (int i = 0; i + 1 < headers.length; i += 2) c.addRequestProperty(headers[i], headers[i + 1]);
@@ -160,6 +162,53 @@ final class Net {
             ACTIVE.remove(key);
             if (c != null) c.disconnect();
         }
+    }
+
+    /**
+     * HttpURLConnection.setRequestMethod only accepts the eight HTTP/1.1
+     * methods and throws for WebDAV extensions (PROPFIND, MKCOL, ...).
+     * Set the standard ones the normal way; for extensions, write the
+     * connection's `method` field directly, as the JDK itself does after
+     * validating a standard name.
+     *
+     * Android's HTTPS implementation (HttpsURLConnectionImpl) delegates to
+     * an inner HttpURLConnectionImpl that holds the real `method`; writing
+     * the field on the wrapper alone leaves the delegate on GET. Resolve a
+     * `delegate` field down the class chain when present, so HTTPS works too.
+     */
+    private static void setMethod(HttpURLConnection c, String method) throws Exception {
+        try {
+            c.setRequestMethod(method);
+            return;
+        } catch (ProtocolException expected) {
+            // WebDAV extension method: bypass HttpURLConnectionImpl's whitelist.
+        }
+        HttpURLConnection target = c;
+        Field delegate = findField(c.getClass(), "delegate");
+        if (delegate != null) {
+            try {
+                delegate.setAccessible(true);
+                Object d = delegate.get(c);
+                if (d instanceof HttpURLConnection) target = (HttpURLConnection) d;
+            } catch (Throwable ignored) {
+                // Not accessible (hidden-API restrictions): fall back to c.
+            }
+        }
+        Field field = HttpURLConnection.class.getDeclaredField("method");
+        field.setAccessible(true);
+        field.set(target, method);
+    }
+
+    /** Finds a field by name on a class or any ancestor. */
+    private static Field findField(Class<?> type, String name) {
+        for (Class<?> t = type; t != null; t = t.getSuperclass()) {
+            try {
+                return t.getDeclaredField(name);
+            } catch (NoSuchFieldException ignored) {
+                // Keep walking up.
+            }
+        }
+        return null;
     }
 
     static byte[] readAll(InputStream in) throws java.io.IOException {
