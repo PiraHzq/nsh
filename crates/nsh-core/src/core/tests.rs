@@ -2996,6 +2996,105 @@ fn scroll_reports_content_size() {
     )));
 }
 
+/// A scroll view's content extent is its content's own, even below the
+/// viewport (#2901): the frame floor made a short list under an iOS large
+/// title scroll by the insets UIKit adds around the viewport.
+#[test]
+fn scroll_content_below_the_viewport_is_the_content() {
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::Scroll,
+            },
+            style_op(2, &[("height", StyleValue::Number(200.0))]),
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+            Op::Create {
+                id: 3,
+                tag: Tag::View,
+            },
+            style_op(3, &[("height", StyleValue::Number(100.0))]),
+            Op::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+        ],
+    );
+    let content = |batch: &MountBatch| {
+        batch.items.iter().find_map(|i| match i {
+            MountItem::ScrollContent { id: 2, size } => Some(*size),
+            _ => None,
+        })
+    };
+    let batch = c.commit().unwrap();
+    // The row is the content, not the 200-point viewport it lies in.
+    assert_eq!(content(&batch), Some(size_pt(320.0, 100.0)));
+
+    // Growing past the viewport reports the grown content.
+    apply(
+        &mut c,
+        vec![style_op(3, &[("height", StyleValue::Number(500.0))])],
+    );
+    let batch = c.commit().unwrap();
+    assert_eq!(content(&batch), Some(size_pt(320.0, 500.0)));
+}
+
+/// A horizontal scroll view's main axis is its width: content narrower
+/// than the viewport is its own extent there too, while the height it
+/// spans stays the viewport's.
+#[test]
+fn horizontal_scroll_content_below_the_viewport_is_the_content() {
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::Scroll,
+            },
+            style_op(
+                2,
+                &[
+                    ("width", StyleValue::Number(200.0)),
+                    ("height", StyleValue::Number(100.0)),
+                ],
+            ),
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Horizontal(true),
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+            Op::Create {
+                id: 3,
+                tag: Tag::View,
+            },
+            style_op(3, &[("width", StyleValue::Number(50.0))]),
+            Op::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    let content = batch.items.iter().find_map(|i| match i {
+        MountItem::ScrollContent { id: 2, size } => Some(*size),
+        _ => None,
+    });
+    assert_eq!(content, Some(size_pt(50.0, 100.0)));
+}
+
 /// `scrollsToTop` reaches the scroll view's mounted behavior (iOS sets
 /// `UIScrollView.scrollsToTop` from it): on by default, off when the app
 /// says so, and on again.
@@ -5838,6 +5937,129 @@ fn multiline_inputs_stop_at_their_max_height_and_so_do_their_parents() {
     assert_eq!(content, Some(88.0));
 }
 
+/// An input scrolls its own text: text taller than a fixed height stays in
+/// it and must not grow the content size of a scroll view around it, or
+/// that scroll view scrolls on into a blank below its last child.
+#[test]
+fn a_fixed_height_inputs_text_does_not_grow_the_scroll_content_around_it() {
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 4,
+                tag: Tag::Scroll,
+            },
+            style_op(
+                4,
+                &[
+                    ("width", StyleValue::Number(200.0)),
+                    ("height", StyleValue::Number(150.0)),
+                ],
+            ),
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 4,
+                before: None,
+            },
+            Op::Create {
+                id: 3,
+                tag: Tag::View,
+            },
+            Op::Insert {
+                parent: 4,
+                child: 3,
+                before: None,
+            },
+            Op::Create {
+                id: 2,
+                tag: Tag::Input,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Multiline(true),
+            },
+            style_op(2, &[("height", StyleValue::Number(100.0))]),
+            Op::Insert {
+                parent: 3,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    c.commit();
+    // Far more text than its 100pt show.
+    c.input_changed(2, &"x".repeat(1000), 1);
+    // Nothing of the layout may change at all: no batch is as good as one
+    // without these items.
+    let batch = c.commit();
+    let items = batch.as_ref().map_or(&[][..], |b| &b.items[..]);
+    // It keeps its height (its frame unchanged, if sent at all).
+    let frame = items.iter().rev().find_map(|i| match i {
+        MountItem::Frame { id: 2, frame } => Some(frame.size.height.0),
+        _ => None,
+    });
+    assert!(frame.is_none_or(|h| h == 100.0), "input height {frame:?}");
+    let content = items.iter().rev().find_map(|i| match i {
+        MountItem::ScrollContent { id: 4, size } => Some(size.height.0),
+        _ => None,
+    });
+    // The scroll view's content is its child's 100pt, or unchanged (not sent).
+    assert!(
+        content.is_none_or(|h| h == 150.0),
+        "scroll content height {content:?}"
+    );
+}
+
+/// The space around an input can be narrower than its own padding (a
+/// column squeezed while it resizes): the input then has no room for its
+/// text, not a negative one.
+/// A negative content width made the overflow Taffy computes from it
+/// negative, which its debug assertions reject.
+#[test]
+fn an_input_narrower_than_its_padding_measures_no_room_for_its_text() {
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 3,
+                tag: Tag::View,
+            },
+            style_op(
+                3,
+                &[
+                    ("alignItems", StyleValue::Str("flex-start")),
+                    ("width", StyleValue::Number(10.0)),
+                ],
+            ),
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 3,
+                before: None,
+            },
+            Op::Create {
+                id: 2,
+                tag: Tag::Input,
+            },
+            style_op(2, &[("paddingHorizontal", StyleValue::Number(15.0))]),
+            Op::Insert {
+                parent: 3,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().expect("the first layout");
+    let width = batch.items.iter().rev().find_map(|i| match i {
+        MountItem::Frame { id: 2, frame } => Some(frame.size.width.0),
+        _ => None,
+    });
+    // Its padding and no text: the column's 10 points cannot make it
+    // narrower than its padding.
+    assert_eq!(width, Some(30.0));
+}
+
 #[test]
 fn multiline_inputs_measure_long_runs_in_pieces() {
     let mut c = input_core();
@@ -8340,6 +8562,33 @@ fn backdrop_material_survives_restyling_and_resets() {
     let mounted = view_style_of(&c.commit().unwrap(), 2).unwrap();
     assert_eq!(mounted.backdrop_material, BackdropMaterial::UltraThin);
     assert!(!mounted.effects.unwrap().backdrop_filters.is_empty());
+}
+
+#[test]
+fn zoomable_decodes_per_element() {
+    use crate::js::host::{HostCx, HostProps};
+    // Scroll views and web views share the name: each decodes it as its
+    // own prop.
+    let decode = |tag: Tag| {
+        let mut cx = HostCx::for_element(tag);
+        <Prop as HostProps>::decode("zoomable", &HostTestValue::Bool(true), &mut cx)
+            .expect("a zoomable prop")
+            .expect("a value")
+    };
+    assert_eq!(
+        decode(Tag::WebView),
+        Prop::Native(NativeProp::Zoomable(true))
+    );
+    assert_eq!(decode(Tag::Scroll), Prop::Scroll(ScrollProp::Pinch(true)));
+    // Cleared from JS: a web view does not zoom, a scroll view does.
+    assert_eq!(
+        Prop::Native(NativeProp::Zoomable(true)).reset(),
+        Some(Prop::Native(NativeProp::Zoomable(false)))
+    );
+    assert_eq!(
+        Prop::Scroll(ScrollProp::Pinch(false)).reset(),
+        Some(Prop::Scroll(ScrollProp::Pinch(true)))
+    );
 }
 
 #[test]
@@ -13517,6 +13766,261 @@ fn web_source(batch: &MountBatch, view: NodeId) -> Option<crate::WebSource> {
     })
 }
 
+/// A core whose app declares `capabilities`, with web view 2 made from
+/// `props` in one render (its errors listened to): the source the platform
+/// receives, its `allowOrigin`, and the access errors it heard.
+fn web_view_with_access(
+    capabilities: serde_json::Value,
+    props: Vec<Prop>,
+) -> (
+    Core<FakeEngine>,
+    Option<crate::WebSource>,
+    Option<crate::access::WebOrigin>,
+    Vec<String>,
+) {
+    let mut c = core();
+    c.set_access(Arc::new(crate::access::Access {
+        declared: crate::access::Capabilities::from_json(&capabilities).unwrap(),
+        granted: None,
+    }));
+    let mut ops = vec![
+        Op::Create {
+            id: 2,
+            tag: Tag::WebView,
+        },
+        Op::Listen {
+            id: 2,
+            event: EventKind::Error,
+            enabled: true,
+        },
+    ];
+    ops.extend(props.into_iter().map(|prop| Op::SetProp { id: 2, prop }));
+    ops.push(Op::Insert {
+        parent: ROOT_ID,
+        child: 2,
+        before: None,
+    });
+    apply(&mut c, ops);
+    let batch = c.commit().unwrap();
+    let origin = batch.items.iter().rev().find_map(|i| match i {
+        MountItem::NativeProps {
+            id: 2,
+            props: crate::NativeProps::WebView(p),
+        } => Some(p.allow_origin.clone()),
+        _ => None,
+    });
+    let denied = access_errors(&mut c, 2);
+    (c, web_source(&batch, 2), origin.flatten(), denied)
+}
+
+/// The messages of the access errors node `view` heard.
+fn access_errors(c: &mut Core<FakeEngine>, view: NodeId) -> Vec<String> {
+    js_events(c)
+        .into_iter()
+        .filter_map(|e| match e {
+            (id, EventKind::Error, EventPayload::Map(fields))
+                if id == view
+                    && fields.iter().any(|(k, v)| {
+                        *k == "code" && *v == crate::PayloadValue::Str("ERR_ACCESS_DENIED".into())
+                    }) =>
+            {
+                fields.into_iter().find_map(|(k, v)| match (k, v) {
+                    ("message", crate::PayloadValue::Str(m)) => Some(m.to_string()),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// `allowOrigin` adds one origin, decided while the app runs, to the hosts
+/// a web view may show, when the app declares `webview.runtimeOrigin`; set
+/// in the same render as `src`, before or after it, it applies to it.
+#[test]
+fn web_view_allow_origin_grants_its_origin() {
+    let caps = serde_json::json!({ "webview": { "hosts": ["127.0.0.1"], "runtimeOrigin": true } });
+    let page = "http://192.168.1.5:9876/session-page/T/index.html";
+    let src = || Prop::Native(NativeProp::Src(Some(page.into())));
+    let origin = |o: &str| Prop::Native(NativeProp::AllowOrigin(Some(o.into())));
+    let loaded = Some(crate::WebSource::Uri(page.into()));
+    for props in [
+        vec![src(), origin("http://192.168.1.5:9876")],
+        vec![origin("http://192.168.1.5:9876"), src()],
+    ] {
+        let (c, source, kept, denied) = web_view_with_access(caps.clone(), props);
+        assert_eq!(source, loaded);
+        assert_eq!(
+            kept.map(|o| o.to_string()).as_deref(),
+            Some("http://192.168.1.5:9876")
+        );
+        assert!(denied.is_empty(), "{denied:?}");
+        assert!(c.denied.is_empty(), "{:?}", c.denied);
+    }
+    // Written in its one form: the default port and the case dropped.
+    let (_, _, kept, _) =
+        web_view_with_access(caps.clone(), vec![origin("HTTPS://Name.Example.net:443/")]);
+    assert_eq!(
+        kept.map(|o| o.to_string()).as_deref(),
+        Some("https://name.example.net")
+    );
+    // Another origin is refused once, as a host not granted is.
+    for other in [
+        "http://192.168.1.5:9877/x",
+        "https://192.168.1.5:9876/x",
+        "http://a.192.168.1.5:9876/x",
+        "http://192.168.1.5:9876@evil.com/",
+    ] {
+        let (_, source, _, denied) = web_view_with_access(
+            caps.clone(),
+            vec![
+                Prop::Native(NativeProp::Src(Some(other.into()))),
+                origin("http://192.168.1.5:9876"),
+            ],
+        );
+        assert_eq!(source, Some(crate::WebSource::None), "{other}");
+        assert!(
+            matches!(&denied[..], [m] if m.contains("the web page")),
+            "{other}: {denied:?}"
+        );
+    }
+    // A base URL at the origin is kept with its HTML.
+    let (_, source, _, denied) = web_view_with_access(
+        caps.clone(),
+        vec![
+            Prop::Native(NativeProp::Html(Some("<b>hi</b>".into()))),
+            Prop::Native(NativeProp::BaseUrl(Some(
+                "http://192.168.1.5:9876/r/".into(),
+            ))),
+            origin("http://192.168.1.5:9876"),
+        ],
+    );
+    assert_eq!(
+        source,
+        Some(crate::WebSource::Html {
+            html: "<b>hi</b>".into(),
+            base_url: Some("http://192.168.1.5:9876/r/".into()),
+        })
+    );
+    assert!(denied.is_empty(), "{denied:?}");
+    // `webview.hosts` still grants on its own.
+    let (_, source, _, denied) = web_view_with_access(
+        caps,
+        vec![Prop::Native(NativeProp::Src(Some(
+            "http://127.0.0.1:6711/".into(),
+        )))],
+    );
+    assert_eq!(
+        source,
+        Some(crate::WebSource::Uri("http://127.0.0.1:6711/".into()))
+    );
+    assert!(denied.is_empty(), "{denied:?}");
+}
+
+/// Without `webview.runtimeOrigin` the prop is refused with a message and
+/// the web view keeps to `webview.hosts`, its URLs refused as before; a
+/// value that is not an origin is refused whatever the grant.
+#[test]
+fn web_view_allow_origin_needs_the_grant_and_an_origin() {
+    let page = "http://192.168.1.5:9876/index.html";
+    let (c, source, kept, denied) = web_view_with_access(
+        serde_json::json!({ "webview": { "hosts": ["127.0.0.1"] } }),
+        vec![
+            Prop::Native(NativeProp::AllowOrigin(Some(
+                "http://192.168.1.5:9876".into(),
+            ))),
+            Prop::Native(NativeProp::Src(Some(page.into()))),
+        ],
+    );
+    assert_eq!(source, Some(crate::WebSource::None));
+    assert_eq!(kept, None);
+    assert!(
+        matches!(&denied[..], [m] if m.contains("the web page")),
+        "{denied:?}"
+    );
+    assert!(
+        c.denied
+            .iter()
+            .any(|m| m.contains("add `\"runtimeOrigin\": true`")),
+        "{:?}",
+        c.denied
+    );
+    let caps = serde_json::json!({ "webview": { "hosts": ["127.0.0.1"], "runtimeOrigin": true } });
+    for bad in [
+        "http://h/path",
+        "http://h?q",
+        "http://h#f",
+        "http://u@h",
+        "*",
+        "ftp://h",
+        "http://*.h",
+        "http://bücher.example",
+        "h:80",
+    ] {
+        let (c, _, kept, _) = web_view_with_access(
+            caps.clone(),
+            vec![Prop::Native(NativeProp::AllowOrigin(Some(bad.into())))],
+        );
+        assert_eq!(kept, None, "{bad}");
+        assert!(
+            c.denied.iter().any(|m| m.starts_with("`allowOrigin`")),
+            "{bad}: {:?}",
+            c.denied
+        );
+    }
+}
+
+/// `load()` checks against the web view's origin of the moment: a new
+/// `allowOrigin` refuses the old one from the next load.
+#[test]
+fn web_view_allow_origin_applies_to_loads() {
+    let caps = serde_json::json!({ "webview": { "hosts": ["127.0.0.1"], "runtimeOrigin": true } });
+    let (mut c, _, _, _) = web_view_with_access(
+        caps,
+        vec![Prop::Native(NativeProp::AllowOrigin(Some(
+            "http://192.168.1.5:9876".into(),
+        )))],
+    );
+    let load = |c: &mut Core<FakeEngine>, url: &str| {
+        apply(
+            c,
+            vec![Op::Command {
+                id: 2,
+                command: Command::Load(crate::WebLoad {
+                    src: url.into(),
+                    headers: Vec::new(),
+                }),
+            }],
+        );
+        let batch = c.commit();
+        let sent = batch.is_some_and(|b| {
+            b.items.iter().any(|i| {
+                matches!(i, MountItem::Command { id: 2, command: Command::Load(l) } if l.src == url)
+            })
+        });
+        (sent, access_errors(c, 2))
+    };
+    assert_eq!(load(&mut c, "http://192.168.1.5:9876/a"), (true, vec![]));
+    apply(
+        &mut c,
+        vec![Op::SetProp {
+            id: 2,
+            prop: Prop::Native(NativeProp::AllowOrigin(Some("http://10.0.0.2:9876".into()))),
+        }],
+    );
+    c.commit();
+    let (sent, _) = load(&mut c, "http://192.168.1.5:9876/b");
+    assert!(!sent);
+    assert!(
+        c.denied
+            .iter()
+            .any(|m| m.contains("http://192.168.1.5:9876/b")),
+        "{:?}",
+        c.denied
+    );
+    assert!(load(&mut c, "http://10.0.0.2:9876/c").0);
+}
+
 /// Inline HTML loaded with a base URL runs at the base URL's origin
 /// (WebKit, Android, Windows), so the base URL takes the grant a page there
 /// would.
@@ -13687,6 +14191,75 @@ fn web_view_incognito_is_read_when_it_is_made() {
     );
     assert_eq!(c.commit().as_ref().and_then(web), None);
     // Other props still reach it, with the store it was made with.
+    apply(
+        &mut c,
+        vec![Op::SetProp {
+            id: 2,
+            prop: Prop::Native(NativeProp::UserAgent(Some("agent".into()))),
+        }],
+    );
+    assert_eq!(web(&c.commit().unwrap()), Some(true));
+}
+
+#[test]
+fn web_view_zoomable_is_read_when_it_is_made() {
+    let mut c = core();
+    let web = |batch: &MountBatch| {
+        batch.items.iter().rev().find_map(|item| match item {
+            MountItem::NativeProps {
+                id: 2,
+                props: crate::NativeProps::WebView(p),
+            } => Some(p.zoomable),
+            _ => None,
+        })
+    };
+    // Off unless asked.
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::WebView,
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    assert_eq!(web(&c.commit().unwrap()), Some(false));
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::WebView,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Native(NativeProp::Zoomable(true)),
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    // The platform makes the web view with its first props.
+    assert_eq!(web(&c.commit().unwrap()), Some(true));
+    // Made: a change is ignored, and nothing is sent for it.
+    apply(
+        &mut c,
+        vec![Op::SetProp {
+            id: 2,
+            prop: Prop::Native(NativeProp::Zoomable(false)),
+        }],
+    );
+    assert_eq!(c.commit().as_ref().and_then(web), None);
+    // Other props still reach it, as it was made.
     apply(
         &mut c,
         vec![Op::SetProp {
@@ -33385,6 +33958,119 @@ fn fixed_views_are_laid_out_in_their_root_view() {
     let batch = c.commit().unwrap();
     assert!(inserts(&batch).contains(&(ROOT_ID, 4, None)));
     assert_eq!(frame_of(&batch, 4), Some(rect(0.0, 440.0, 320.0, 40.0)));
+}
+
+#[test]
+fn fixing_a_view_in_a_scroll_view_unculls_its_subtree() {
+    let mut c = core();
+    // Scroll view (2) -> wrapper (3) -> toolbar (4) with an existing item (5),
+    // plus a tall spacer (6) and an off-screen descendant (7) that starts culled.
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::Scroll,
+            },
+            style_op(2, &[("height", StyleValue::Number(100.0))]),
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+            Op::Create {
+                id: 3,
+                tag: Tag::View,
+            },
+            class_op(3, "h-[1200px]"),
+            Op::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            Op::Create {
+                id: 4,
+                tag: Tag::View,
+            },
+            class_op(4, "flex-row h-[40px]"),
+            Op::Insert {
+                parent: 3,
+                child: 4,
+                before: None,
+            },
+            Op::Create {
+                id: 5,
+                tag: Tag::View,
+            },
+            class_op(5, "w-[40px] h-[40px]"),
+            Op::Insert {
+                parent: 4,
+                child: 5,
+                before: None,
+            },
+            Op::Create {
+                id: 6,
+                tag: Tag::View,
+            },
+            class_op(6, "h-[1000px]"),
+            Op::Insert {
+                parent: 3,
+                child: 6,
+                before: None,
+            },
+            Op::Create {
+                id: 7,
+                tag: Tag::View,
+            },
+            class_op(7, "h-[40px]"),
+            Op::Insert {
+                parent: 3,
+                child: 7,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    assert!(created_in(&batch).contains(&3));
+    assert!(created_in(&batch).contains(&4));
+    assert!(created_in(&batch).contains(&5));
+    assert!(!created_in(&batch).contains(&7));
+
+    // In the same commit: promote wrapper (3) to `position: fixed` and insert a
+    // new child (8) into toolbar (4). Before `sync_fixed()` runs, `insert` sees
+    // the outer scroll view as the culling scope and holds back (8); once (3)
+    // becomes fixed (`is_layout_root()`), the outer scroll view skips it.
+    apply(
+        &mut c,
+        vec![
+            class_op(3, "fixed inset-0"),
+            Op::Create {
+                id: 8,
+                tag: Tag::View,
+            },
+            class_op(8, "w-[60px] h-[40px]"),
+            Op::Insert {
+                parent: 4,
+                child: 8,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    let created = created_in(&batch);
+    assert!(
+        created.contains(&8),
+        "newly inserted child must be created: {created:?}"
+    );
+    assert!(
+        created.contains(&7),
+        "previously culled descendant must be created: {created:?}"
+    );
+    let ins = inserts(&batch);
+    assert!(ins.contains(&(ROOT_ID, 3, None)), "{ins:?}");
+    assert!(ins.contains(&(4, 8, None)), "{ins:?}");
+    assert!(ins.contains(&(3, 7, None)), "{ins:?}");
+    assert_eq!(frame_of(&batch, 8), Some(rect(40.0, 0.0, 60.0, 40.0)));
 }
 
 #[test]
@@ -54196,4 +54882,51 @@ fn a_focus_outside_the_overlay_does_not_take_its_escape() {
     c.set_states(2, FOCUSED);
     c.commit();
     assert!(!c.focus_takes_escape());
+}
+
+mod by_name {
+    use super::*;
+    use crate::{
+        element::{ComponentElement, Registry, Root},
+        prelude::*,
+    };
+
+    #[component]
+    fn Later() -> impl IntoElement {
+        text("later")
+    }
+
+    #[component]
+    fn Page() -> impl IntoElement {
+        view()
+            .child(text("first"))
+            .child(ComponentElement::<Later>::named(()))
+    }
+
+    /// A component made by name shows nothing until a set registers it,
+    /// then it is made where it was mounted.
+    #[test]
+    fn a_component_made_by_name_is_made_when_its_set_registers_it() {
+        let mut c = core();
+        c.mount_root(&Root::new::<Page>(|| ()));
+        let batch = c.commit().unwrap();
+        assert_eq!(super::views::texts(&batch), ["first"]);
+        let mut registry = Registry::new();
+        registry.register::<Later>();
+        c.extend_components(registry);
+        let batch = c.commit().unwrap();
+        assert_eq!(super::views::texts(&batch), ["later"]);
+    }
+
+    /// Registered already (a native runtime): made at once.
+    #[test]
+    fn a_registered_component_made_by_name_is_made_at_once() {
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Later>();
+        c.set_components(registry);
+        c.mount_root(&Root::new::<Page>(|| ()));
+        let batch = c.commit().unwrap();
+        assert_eq!(super::views::texts(&batch), ["first", "later"]);
+    }
 }

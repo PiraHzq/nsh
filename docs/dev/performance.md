@@ -720,6 +720,14 @@ sends 2631 mount items instead of 2885 (no `ViewProps` set and set back in one c
   hardware layers take the slowest back frame's UI thread from 22–36 ms to 2–5 ms and missed frames from 23–32 to
   7–14 per page (p90 frame 35–58 → 14–32 ms). What remains is the RenderThread drawing both screens into their layers
   in the slide's first frames (14–29 ms). Pushes are unchanged (no push frame over 25 ms on the UI thread).
+- Android, clipping to continuous corners (Pixel 10 Pro, Android 17, 120 Hz, packaged release; the gallery's index,
+  whose banner of ~330 canvas dots and cards clip to continuous corners): a scrolled frame uploaded ~440 textures,
+  one clip mask per draw inside those boxes, and took 7–8 ms of RenderThread; drawing their children clipped to
+  rectangles and corner layers (`Box.drawInCorners`), ~20 uploads and 4–5 ms. Going back to the index (the same six
+  pages, five rounds each, two runs before and three after, interleaved): missed frames per back 1.3–2.2 → 0.4–2.1 and
+  the slowest RenderThread frame of a back 27–41 → 14–26 ms (Stocks 70 → 49 ms: its own page, live charts drawn into
+  the slide's layer, is what remains). GPU memory after scrolling the whole index: 146–149 MB before, 116–118 MB after,
+  of a 125 MB budget; layers of the whole box were ~1 missed frame per back faster but kept 167–169 MB.
 - Android, glass surfaces (x86_64 emulator, Android 15, SwiftShader, 1080 × 2400 at 2.625x, packaged release; an app
   of four pages of about the screen's size in a horizontal pager, each with a 24 pt backdrop blur, a 28 pt outer
   shadow and a 1 px inset rim, under a blurred header and tab bar; eight swipes, `gfxinfo` p50 over three
@@ -843,6 +851,11 @@ sends 2631 mount items instead of 2885 (no `ViewProps` set and set back in one c
   it replaced did (0.57ms).
   The native context records into a Rust list (`nsh-js` `canvas.rs`): the same 17 500 calls take ~1.0–1.1ms
   (~1.7ms in the former JS runtime, measured A/B), and 12 of them plus decoding one commit 21–22ms (61ms).
+- Canvas text on macOS (`cargo test --release -p nsh-platform-macos --lib bench_canvas_text -- --ignored --nocapture`,
+  a 40 × 8 quote table of 320 `fillText`s painted into a 760 × 820 point bitmap at scale 2, Apple Silicon): with each
+  canvas keeping its fonts and `CTLine`s (`canvas/lines.rs`), a paint with the same texts (a window being resized)
+  takes ~0.34–0.41ms and one after a new drawing changed every text ~1.5–1.6ms, against ~11.2–11.8ms either way when
+  every paint made a font, an attributed string and a line per text.
 - `OffscreenCanvas` on Windows: the UI thread records, submits the drawing and its copy, and maps the read-back
   bitmap once a Direct3D event query polled every timer tick says the GPU is done, so a large image costs it the
   recording and one copy of its rows, never a wait for the GPU; unpremultiplying and PNG encoding run on a thread.

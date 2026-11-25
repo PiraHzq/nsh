@@ -67,6 +67,11 @@ pub struct WebProps {
     /// The `baseUrl` prop, which [`Self::source`] holds while `html` is
     /// set.
     pub base_url: Option<Arc<str>>,
+    /// The one origin this web view may show besides `webview.hosts`
+    /// (`allowOrigin`, granted by `webview.runtimeOrigin`): a web view's
+    /// backend checks its navigations with
+    /// [`Access::allows_webview_with`](crate::access::Access::allows_webview_with).
+    pub allow_origin: Option<crate::access::WebOrigin>,
     /// Script run after each page loads.
     pub injected_js: Option<Arc<str>>,
     /// Script run before each page's own scripts.
@@ -84,6 +89,9 @@ pub struct WebProps {
     /// HTTP cache and no saved form data). Read when the platform makes the
     /// web view: the core keeps it from changing afterwards.
     pub incognito: bool,
+    /// The person can pinch to zoom the page, past its viewport's scale
+    /// limits. Read when the platform makes the web view, as `incognito`.
+    pub zoomable: bool,
     /// The URL schemes the page loads from the app
     /// ([`crate::web_resource`]). Read when the platform makes the web
     /// view, as `incognito`.
@@ -101,6 +109,7 @@ impl Default for WebProps {
             source: WebSource::None,
             src: None,
             base_url: None,
+            allow_origin: None,
             injected_js: None,
             injected_js_before: None,
             user_agent: None,
@@ -108,6 +117,7 @@ impl Default for WebProps {
             javascript_enabled: true,
             back_forward_gestures: false,
             incognito: false,
+            zoomable: false,
             url_schemes: Vec::new(),
             defer_downloads: false,
         }

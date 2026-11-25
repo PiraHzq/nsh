@@ -1434,6 +1434,10 @@ fn native_props(e: &mut Encoded, p: &NativeProps) {
             e.bool(w.scrollable);
             e.bool(w.javascript_enabled);
             e.bool(w.incognito);
+            e.bool(w.zoomable);
+            // Its one written form, which `Native.allowsWebview` reads back.
+            let origin = w.allow_origin.as_ref().map(ToString::to_string);
+            e.opt_string(origin.as_deref());
         }
         NativeProps::Video(v) => {
             e.int(4);
@@ -1484,6 +1488,7 @@ fn screen_config(e: &mut Encoded, c: &ScreenConfig) {
         HeaderTitleAlign::Left => 0,
         HeaderTitleAlign::Center => 1,
     });
+    e.bool(c.hides_bottom_bar_when_pushed);
 }
 
 fn view_props(e: &mut Encoded, p: &ViewProps) {

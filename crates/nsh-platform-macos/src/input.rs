@@ -418,6 +418,15 @@ pub(crate) fn removed(surface: &Surface, view: &NshView) {
         None => crate::text_input::taken_out(&window),
     }
     window.makeFirstResponder(None);
+    // Then the root, as when the view hides or is blurred (the page's body
+    // in a browser): left on the window, the focus reaches no responder of
+    // the root's keys and actions (Copy of a page selection, Escape,
+    // scrolling keys), and a press on a page text does not take it back.
+    // Not when the root leaves with the view (its window closes).
+    let root = root_in(surface, &window);
+    if !root.ns().isDescendantOf(view.ns()) {
+        window.makeFirstResponder(Some(root.ns()));
+    }
 }
 
 /// Sets or clears interaction state `bit` of `view` and reports the
@@ -3629,6 +3638,25 @@ pub(crate) fn forward_scroll(surface: &Rc<Surface>, ns_event: &NSEvent) {
         event(surface, ns_event);
         crate::surface::quiet(|| surface.revisit());
     });
+}
+
+/// Begins a trackpad gesture on the surface at `ns_event` (a change of
+/// it), for a gesture that began on a hosted view which then passed it on:
+/// the surface sees a begin before the changes, as for its own gestures.
+pub(crate) fn begin_gesture(surface: &Rc<Surface>, ns_event: &NSEvent) {
+    let p = event_root(surface)
+        .ns()
+        .convertPoint_fromView(ns_event.locationInWindow(), None);
+    let time = ns_event.timestamp() * 1000.0;
+    gesture_event(
+        surface,
+        NSEventPhase::Began,
+        p.x as f32,
+        p.y as f32,
+        0.0,
+        0.0,
+        time,
+    );
 }
 
 /// A `scrollWheel:` event at `(x, y)`.

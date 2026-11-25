@@ -134,6 +134,7 @@ final class Mounter {
         float headerHeight;
         /** `headerTitleAlign` "center". */
         boolean centerTitle;
+        boolean hidesBottomBar;
     }
 
     /** Properties that animations can override, as last set by a style. */
@@ -257,6 +258,24 @@ final class Mounter {
     TextBox selectedText;
     /** The selectable view with a selection (one per surface, a text's or an area's). */
     SelectableView selectedArea;
+
+    /** Whether a text or a selectable view holds a selection (back ends it first). */
+    boolean hasSelection() {
+        return selectedText != null || selectedArea != null;
+    }
+
+    /** Ends the selection there is; false when there is none. */
+    private boolean endSelection() {
+        if (selectedArea != null) {
+            selectedArea.clear();
+            return true;
+        }
+        if (selectedText != null) {
+            selectedText.clearSelection();
+            return true;
+        }
+        return false;
+    }
     /** Selectable views (`ViewProps.selectable_view`), by view. */
     private final SparseArray<SelectableView> selectableViews = new SparseArray<>();
 
@@ -344,6 +363,9 @@ final class Mounter {
     private final java.util.ArrayList<StackBox> stacks = new java.util.ArrayList<>();
     private final java.util.ArrayList<ModalHost> shownModals = new java.util.ArrayList<>();
 
+    /** Re-syncs the tab bars when stacks, screens, or their visibility changed in a batch. */
+    private boolean bottomBarDirty;
+
     /** The surface root (node 1). */
     final Box root;
 
@@ -380,9 +402,13 @@ final class Mounter {
         views.put(1, root);
     }
 
-    /** Whether the running app's web views may navigate to {@code url} (its capabilities). */
-    boolean allowsWebview(String url) {
-        return Native.allowsWebview(handle(), url);
+    /**
+     * Whether a web view whose {@code allowOrigin} is {@code origin} (null:
+     * none) may navigate to {@code url} (the app's capabilities). The origin
+     * is compared in Rust.
+     */
+    boolean allowsWebview(String url, String origin) {
+        return Native.allowsWebview(handle(), url, origin);
     }
 
     /** Whether the running app's web pages may capture {@code kind} (its {@code webview.media}). */
@@ -1010,6 +1036,7 @@ final class Mounter {
             return;
         }
         ((ComponentBox) v).attach(factory.create(new NshComponentContext(host, id)));
+        if (((ComponentBox) v).component instanceof TabBarComponent) bottomBarDirty = true;
     }
 
     private static ViewGroup container(View parent) {
@@ -1221,6 +1248,7 @@ final class Mounter {
             return;
         }
         Box.Frame f = Box.frame(v);
+        boolean wasEmpty = f.right <= f.left || f.bottom <= f.top;
         Transition t = layoutAnimation != null ? layoutAnimation[1] : null;
         // A view never placed has no frame to move from; one placed zero
         // high (a collapsed reveal) or zero wide grows from it, as on iOS.
@@ -1252,6 +1280,7 @@ final class Mounter {
             f.bottom = to[3];
             Box.place(v);
         }
+        if (!stacks.isEmpty() && wasEmpty != (to[2] <= to[0] || to[3] <= to[1])) bottomBarDirty = true;
         if (v instanceof ImageBox) loadImage((ImageBox) v);
     }
 
@@ -1323,6 +1352,7 @@ final class Mounter {
             decor.originYFraction = originYFraction;
             decor.backfaceHidden = backfaceHidden;
             decor.clipPath = hasClip ? clip : null;
+            if (!stacks.isEmpty() && decor.hidden != fx.hidden) bottomBarDirty = true;
             decor.hidden = fx.hidden;
             decor.boxShadows = fx.shadows;
             decor.boxShadowColors = fx.shadowColors;
@@ -2118,10 +2148,12 @@ final class Mounter {
         o.headerHeight = b.getFloat();
         o.backTitle = string(objects, b.getInt());
         o.centerTitle = b.getInt() == 1;
+        o.hidesBottomBar = b.getInt() != 0;
         screenOptions.put(id, o);
         dirtyScreens.add(id);
         int stack = hosts.get(id, -1);
         if (stack >= 0) dirtyStacks.add(stack);
+        bottomBarDirty = true;
     }
 
     private static int skip(ByteBuffer b) {
@@ -2137,14 +2169,18 @@ final class Mounter {
                 StackBox stack = (StackBox) v;
                 for (int s : stack.screens) {
                     dirtyScreens.add(s);
-                    // The transition reads each screen's animation: a screen
-                    // mounted in this batch is configured only below, so give
-                    // it its option before the stack animates it in.
+                    // The transition reads each screen's animation and hidesBottomBar:
+                    // a screen mounted in this batch is configured only below, so give
+                    // it its options before the stack reconciles and animates it in.
                     View sv = views.get(s);
                     ScreenOptions so = screenOptions.get(s);
-                    if (sv instanceof StackBox.ScreenBox && so != null) ((StackBox.ScreenBox) sv).animation = so.animation;
+                    if (sv instanceof StackBox.ScreenBox && so != null) {
+                        ((StackBox.ScreenBox) sv).animation = so.animation;
+                        ((StackBox.ScreenBox) sv).hidesBottomBar = so.hidesBottomBar;
+                    }
                 }
                 stack.reconcile();
+                bottomBarDirty = true;
             }
         }
         dirtyStacks.clear();
@@ -2159,7 +2195,7 @@ final class Mounter {
             ScreenOptions below = canGoBack ? screenOptions.get(((StackBox) stack).screens.get(index - 1)) : null;
             ((StackBox.ScreenBox) v).configure(this, o.title, o.shown, o.transparent, o.tint, o.background,
                     o.titleColor, o.backVisible, o.gesture, o.preventBack, o.animation, o.left, o.right, o.titleView,
-                    o.headerHeight, o.centerTitle, canGoBack, below != null ? below.backTitle : null);
+                    o.headerHeight, o.centerTitle, o.hidesBottomBar, canGoBack, below != null ? below.backTitle : null);
             reportScreenInsets(id, o);
         }
         dirtyScreens.clear();
@@ -2177,6 +2213,10 @@ final class Mounter {
             }
         }
         dirtyModals.clear();
+        if (bottomBarDirty) {
+            bottomBarDirty = false;
+            for (StackBox s : stacks) s.syncBottomBar(false);
+        }
         updateBack();
     }
 
@@ -2214,7 +2254,7 @@ final class Mounter {
      * by asking JS: the system asks synchronously.
      */
     boolean wantsBack() {
-        if (!shownModals.isEmpty()) return true;
+        if (!shownModals.isEmpty() || hasSelection()) return true;
         return backStack() != null || wants(1, Native.BACK_PRESS);
     }
 
@@ -2385,6 +2425,8 @@ final class Mounter {
      * listeners hear it (and send {@code Command::Back} when none takes it),
      * else the innermost stack pops. Returns false if nothing did. */
     boolean handleBack() {
+        // A selection goes first, as TextView's: back ends it and goes no further.
+        if (endSelection()) return true;
         if (!shownModals.isEmpty()) {
             shownModals.get(shownModals.size() - 1).backPressed();
             return true;
@@ -3142,7 +3184,11 @@ final class Mounter {
                 }
                 String injected = optString(b, objects), before = optString(b, objects), ua = optString(b, objects);
                 boolean scroll = b.getInt() != 0, js = b.getInt() != 0, incognito = b.getInt() != 0;
-                if (v instanceof WebBox) ((WebBox) v).configure(source, injected, before, ua, scroll, js, incognito);
+                boolean zoomable = b.getInt() != 0;
+                String allowOrigin = optString(b, objects);
+                if (v instanceof WebBox) {
+                    ((WebBox) v).configure(source, injected, before, ua, scroll, js, incognito, zoomable, allowOrigin);
+                }
                 break;
             }
             case 4: {
@@ -3216,25 +3262,6 @@ final class Mounter {
         int covered = Math.max(0, at[1] + scroll.getHeight() - screenTop);
         scroll.setContentPaddingBottom(covered);
         avoided = scroll.id;
-        host.post(this::revealFocused);
-    }
-
-    /**
-     * A modal dialog's own window is resized above the software keyboard by
-     * ModalHost.report() (SOFT_INPUT_ADJUST_RESIZE), and its rootSize already
-     * has the IME subtracted. Its scroll views are therefore laid out above
-     * the keyboard already: adding contentPaddingBottom as keyboard() does for
-     * the main surface shrinks them a second time and pushes the focused field
-     * off the top of the panel. Clear any such padding and only reveal focus.
-     */
-    void keyboardForDialog(boolean keyboardVisible) {
-        if (avoided >= 0) {
-            View previous = views.get(avoided);
-            if (previous instanceof ScrollBox) ((ScrollBox) previous).setContentPaddingBottom(0);
-            avoided = -1;
-        }
-        shrinking = -1;
-        if (focused == null || !keyboardVisible) return;
         host.post(this::revealFocused);
     }
 

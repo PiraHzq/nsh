@@ -1212,6 +1212,15 @@ fn mime_of(name: &str) -> &'static str {
     }
 }
 
+/// Where a press lands ([`App::press`]), in points from the view's top left
+/// corner.
+#[derive(Debug, Default, Clone, Copy, PartialEq, JsObject)]
+#[non_exhaustive]
+pub struct PressOptions {
+    /// The point in the view the press lands on; its middle when omitted.
+    pub position: Option<Point<Points>>,
+}
+
 /// How far a drag moves the finger ([`App::drag`]), in points.
 #[derive(Debug, Default, Clone, Copy, PartialEq, JsObject)]
 pub struct DragBy {
@@ -1269,6 +1278,17 @@ pub struct SpanStyle {
     pub font_size: f64,
     /// Its font weight (400 regular, 700 bold).
     pub font_weight: f64,
+    /// Its line height, in points (a multiple or ems of the font size
+    /// resolved against it); absent for the font's natural line height.
+    #[prop(skip_none)]
+    pub line_height: Option<f64>,
+    /// The extra space between its characters, in points (ems resolved).
+    pub letter_spacing: f64,
+    /// The `fontFamily` it has, as the app wrote it (a list stays a list);
+    /// absent for the system font. It is the family asked for, not the
+    /// face a platform falls back to for characters it lacks.
+    #[prop(skip_none)]
+    pub font_family: Option<String>,
     /// Whether it is italic.
     pub italic: bool,
     /// Whether it is underlined.
@@ -1291,6 +1311,10 @@ impl From<nsh_core::ResolvedTextStyle> for SpanStyle {
             background_color: style.background.map(|b| css(b.color)),
             font_size: f64::from(style.font_size.0),
             font_weight: f64::from(style.font_weight),
+            line_height: (style.line_height > nsh_core::Points::ZERO)
+                .then_some(f64::from(style.line_height.0)),
+            letter_spacing: f64::from(style.letter_spacing.0),
+            font_family: style.font_family.map(|f| f.name().to_string()),
             italic: style.italic,
             underline: style.decoration.underline,
             line_through: style.decoration.line_through,
@@ -1366,6 +1390,9 @@ pub struct AccessibilityNode {
     /// Its `accessibilityLabel`.
     #[prop(skip_none)]
     pub label: Option<String>,
+    /// Its accessible name, the one `role:<role>[<name>]` matches: its
+    /// `accessibilityLabel`, else the texts inside it.
+    pub name: String,
     /// It takes no presses.
     pub disabled: bool,
     /// It is selected.
@@ -1380,6 +1407,11 @@ pub struct AccessibilityNode {
     /// `"true"`, `"false"` or `"mixed"`; absent when it is unset.
     #[prop(skip_none)]
     pub pressed: Option<String>,
+    /// Its `accessibilityState.busy`: it is loading.
+    pub busy: bool,
+    /// Its `accessibilityValue.text`.
+    #[prop(skip_none)]
+    pub value: Option<String>,
     /// Its `accessibilityLevel`.
     #[prop(skip_none)]
     pub level: Option<u32>,
@@ -1395,11 +1427,14 @@ impl From<nsh_dev::protocol::AccessibilityNode> for AccessibilityNode {
         AccessibilityNode {
             role: n.role,
             label: n.label,
+            name: n.name,
             disabled: n.disabled,
             selected: n.selected,
             checked: n.checked,
             expanded: n.expanded,
             pressed: n.pressed,
+            busy: n.busy,
+            value: n.value,
             level: n.level,
             description: n.description,
             children: n.children.into_iter().map(Self::from).collect(),
@@ -2121,11 +2156,19 @@ const CLOSED: &str = "the app is closed: the test that opened it ended";
 #[class]
 impl App {
     /// Presses what `selector` names (or the nearest view around it that
-    /// hears presses, as a tap on a button's text does). On iOS, a header
-    /// button of `ios.headerRightItems` is pressed too, by `id:<key>` or
-    /// its label: it presses it, or opens its menu.
-    pub async fn press(this: Instance<Self>, selector: String) -> Result<(), JsError> {
-        step(&this, move |app| app.press(&selector)).await
+    /// hears presses, as a tap on a button's text does), at
+    /// `options.position` in it when given: points from its top left
+    /// corner, so a press can land on a part another view does not cover
+    /// (a sheet's backdrop around its panel). On iOS, a header button of
+    /// `ios.headerRightItems` is pressed too, by `id:<key>` or its label:
+    /// it presses it, or opens its menu.
+    pub async fn press(
+        this: Instance<Self>,
+        selector: String,
+        options: Option<PressOptions>,
+    ) -> Result<(), JsError> {
+        let at = options.and_then(|options| options.position);
+        step(&this, move |app| app.press(&selector, at)).await
     }
 
     /// Types `text` at the end of the input `selector` names (or the first
