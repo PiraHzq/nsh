@@ -824,8 +824,18 @@ fn image_box(width: Option<f32>, height: Option<f32>, natural: Option<(f32, f32)
 /// `AttrStep`), disabled while the document cannot be edited.
 fn task_checkbox(rv: Rv, item: ReadSignal<BlockItem>) -> impl IntoElement {
     let props = rv.props;
+    let mark_item = item;
     let checked = move || {
         item.get()
+            .node
+            .attrs()
+            .get("checked")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    let mark_checked = move || {
+        mark_item
+            .get()
             .node
             .attrs()
             .get("checked")
@@ -847,6 +857,18 @@ fn task_checkbox(rv: Rv, item: ReadSignal<BlockItem>) -> impl IntoElement {
             crate::checkbox()
                 .checked(checked)
                 .disabled(move || !props.editable.get())
+                // A checkbox is only a box: the check mark is the `indicator`
+                // slot the app fills. Task items need it too, or a checked
+                // task shows a plain filled square with no tick (unlike the
+                // reading view, whose TextView draws `✓` itself).
+                .indicator(
+                    text("\u{2713}")
+                        .text_size(px(11.0))
+                        .line_height(px(13.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(move || theme().primary_foreground)
+                        .style_when(move || !mark_checked(), |s| s.opacity(0.0)),
+                )
                 .on_change(move |next: &bool| {
                     if let Some(pos) = press_rv.block_pos(item.get_untracked().id) {
                         press_rv.set_checked(pos, *next);
