@@ -114,7 +114,16 @@ impl Record {
     fn matches_this_build(&self) -> bool {
         let this = Record::this_build();
         self.version == this.version
-            && (this.commit == "unknown" || self.commit == "unknown" || self.commit == this.commit)
+            && (this.commit == "unknown"
+                || self.commit == "unknown"
+                || self.commit == this.commit
+                // A CLI built from a source checkout cannot obtain a
+                // component stamped with its exact (possibly unpushed)
+                // revision: official release archives always carry the
+                // release's commit. Trust a component of the same version
+                // when this CLI itself came from a checkout. Downloaded
+                // components are still verified by SHA-256 in `add_from`.
+                || env!("NSH_SOURCE_BUILD") == "1")
     }
 }
 
@@ -688,6 +697,35 @@ mod tests {
         assert!(!root.join("runtime/android").exists());
         assert!(root.join("runtime/macos").exists());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn commit_check_follows_source_build_flag() {
+        let this = Record::this_build();
+        // Version must always match, whatever the build.
+        let wrong_version = Record {
+            version: "0.0.1".into(),
+            commit: this.commit.clone(),
+        };
+        assert!(!wrong_version.matches_this_build());
+
+        // A different commit of the same version: accepted only when this
+        // CLI was built from a checkout (which cannot fetch its own revision).
+        let other_commit = Record {
+            version: this.version.clone(),
+            commit: "0123456".into(),
+        };
+        assert_eq!(
+            other_commit.matches_this_build(),
+            env!("NSH_SOURCE_BUILD") == "1"
+        );
+
+        // The release's explicit "unknown" escape hatch still works.
+        let unknown = Record {
+            version: this.version.clone(),
+            commit: "unknown".into(),
+        };
+        assert!(unknown.matches_this_build());
     }
 
     #[test]

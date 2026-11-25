@@ -103,6 +103,14 @@ fn main() {
         "cargo:rustc-env=NSH_GIT_SHA_FULL={}",
         full.as_deref().unwrap_or("unknown")
     );
+    // A CLI built from a source checkout cannot fetch components stamped with
+    // its exact revision from an official release. Let `component` trust any
+    // component of the same version instead; released CLIs keep the strict
+    // commit check. See `component::matches_this_build`.
+    println!(
+        "cargo:rustc-env=NSH_SOURCE_BUILD={}",
+        if checkout { "1" } else { "0" }
+    );
 
     // The release channel the build is published on: the nightly workflow
     // sets `nightly`, `nsh update` stays on it. Anything else is `stable`.
