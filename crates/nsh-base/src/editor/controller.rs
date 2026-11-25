@@ -327,9 +327,15 @@ impl Ed {
             if st.font != font {
                 st.display.set_measure(measurer(&font));
                 st.font = font;
+                // relayout() resets the highlighter's tokens. The text did not
+                // change, so they must be recomputed for the new layout —
+                // otherwise the source keeps its plain (unhighlighted) colors
+                // until the document is reopened. Language and highlight-toggle
+                // effects both reschedule; this one must too.
                 st.relayout();
                 drop(st);
                 ed.bump_text();
+                ed.schedule_highlight();
             }
         });
         let ed = self.clone();
