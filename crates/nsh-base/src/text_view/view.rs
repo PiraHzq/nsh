@@ -1552,11 +1552,14 @@ impl Cx {
             } else {
                 &[Part::TableCell]
             };
-            // First, so the cells are drawn over it.
+            // First, so the cells are drawn over it. GitHub tables have no
+            // header background; from the second data row on, every other
+            // row is striped with the subtle background.
+            let striped = !head && r % 2 == 0;
             let row = view()
                 .row_start(line)
                 .col_span_full()
-                .when(head, |v| v.bg(move || theme().muted));
+                .when(striped, |v| v.bg(move || theme().muted));
             grid.push(self.parts(row, row_parts).into_element());
             // Each cell where it starts, as wide as it spans; the columns no
             // cell covers (a short row) are empty cells.
@@ -2387,7 +2390,8 @@ const TABLE_SIZE: f32 = 14.0;
 /// The line height of tables' text, a multiple of [`TABLE_SIZE`].
 const TABLE_LINE: f32 = 1.55;
 /// The space between blocks (0.75em).
-const BLOCK_GAP: f32 = BODY_SIZE * 0.75;
+/// GitHub 正文块间距是 16px；不再跟随内核旧正文 15px 的 0.75em。
+const BLOCK_GAP: f32 = 16.0;
 /// The space between list items (0.25em).
 const ITEM_GAP: f32 = BODY_SIZE * 0.25;
 /// The indent of list items, their markers in it (1.4em).
@@ -2446,8 +2450,6 @@ struct Heading {
     line: f32,
     /// The letter spacing, in ems.
     tracking: f32,
-    /// The room above it after a block, in ems.
-    above: f32,
 }
 
 impl Heading {
@@ -2457,38 +2459,33 @@ impl Heading {
                 size: 27.0,
                 line: 1.25,
                 tracking: -0.02,
-                above: 1.1,
             },
             2 => Self {
                 size: 20.0,
                 line: 1.35,
                 tracking: -0.012,
-                above: 1.6,
             },
             3 => Self {
                 size: 17.0,
                 line: 1.35,
                 tracking: -0.012,
-                above: 1.4,
             },
             _ => Self {
                 size: BODY_SIZE,
                 line: 1.35,
                 tracking: -0.012,
-                above: 1.4,
             },
         }
     }
 
-    /// Its top margin: its room above it less the column's gap (none
-    /// first, less after another heading).
+    /// GitHub 的相邻块外边距折叠后是 `max(上一块 16px, 标题 24px) = 24px`；
+    /// 列布局已经提供 16px，这里只需再补 8px。首个块没有前置兄弟节点，
+    /// 列布局也不会给它 gap，因此保持 0。
     fn margin_top(&self, before: Before) -> f32 {
-        let above = match before {
-            Before::Nothing => return 0.0,
-            Before::Heading => 0.6,
-            Before::Block | Before::Alert => self.above,
-        };
-        (self.size * above - BLOCK_GAP).max(0.0)
+        match before {
+            Before::Nothing => 0.0,
+            Before::Heading | Before::Block | Before::Alert => 8.0,
+        }
     }
 }
 

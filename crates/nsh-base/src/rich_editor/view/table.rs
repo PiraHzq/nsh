@@ -252,9 +252,9 @@ pub(crate) fn grid(wrapper: View, rv: &Rv, item: ReadSignal<BlockItem>) -> View 
 }
 
 /// A cell's block: placed at its slots, its right and bottom borders the
-/// theme's, header cells on the theme's `muted`, and over its content
-/// while a cell selection holds it, the `selectedCell` part (the theme's
-/// selection color).
+/// theme's, every other data row on the theme's `muted`, and over its
+/// content while a cell selection holds it, the `selectedCell` part (the
+/// theme's selection color).
 pub(crate) fn cell(wrapper: View, rv: &Rv, item: ReadSignal<BlockItem>) -> View {
     let first = item.get_untracked();
     let header = table_role(first.node.ty()) == Some(TableRole::HeaderCell);
@@ -272,6 +272,9 @@ pub(crate) fn cell(wrapper: View, rv: &Rv, item: ReadSignal<BlockItem>) -> View 
         let state = place_rv.st.borrow();
         placement(state.doc(), pos).unwrap_or((1, 2, 1, 2))
     });
+    // GitHub 表头无底色，数据行从第二条起隔行淡底。placement 返回的是
+    // 1-based 网格线号：表头 1、第一条数据 2、第二条数据 3……
+    let striped = !header && at.get().2 % 2 == 1;
     let selected_rv = rv.clone();
     let selected = move || {
         selected_rv.sel_rev.get();
@@ -310,7 +313,7 @@ pub(crate) fn cell(wrapper: View, rv: &Rv, item: ReadSignal<BlockItem>) -> View 
         .border_r(px(1.0))
         .border_b(px(1.0))
         .border_color(move || theme().border)
-        .when(header, |v| v.bg(move || theme().muted))
+        .when(striped, |v| v.bg(move || theme().muted))
         .child(when(selected, move || {
             part(
                 view()
