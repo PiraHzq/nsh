@@ -1119,8 +1119,14 @@ mod tests {
         fs::write(new.join("App.exe"), "new").unwrap();
         swap_entries(&root, &new, Path::new("App.exe")).unwrap();
         assert_eq!(fs::read_to_string(root.join("App.exe")).unwrap(), "new");
-        assert_eq!(fs::read_to_string(root.join("unins000.exe")).unwrap(), "uninstaller");
-        assert_eq!(fs::read_to_string(root.join("unins000.dat")).unwrap(), "log");
+        assert_eq!(
+            fs::read_to_string(root.join("unins000.exe")).unwrap(),
+            "uninstaller"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("unins000.dat")).unwrap(),
+            "log"
+        );
         // Only the uninstaller's own names: anything else the app no longer ships goes.
         assert!(!root.join("uninstall-notes.txt").exists());
         assert!(installer_owned(std::ffi::OsStr::new("UNINS001.MSG")));
