@@ -16,6 +16,8 @@ mod access;
 mod app_directory;
 mod cache;
 mod error;
+#[cfg_attr(not(feature = "shader"), path = "gpu_off.rs")]
+pub mod gpu;
 // Where shader frames go: read back, or on surfaces the backend shows.
 #[cfg(feature = "shader")]
 mod frames;
@@ -124,6 +126,19 @@ const IDLE_GC_QUIET: Duration = Duration::from_millis(300);
 
 /// The longest time between idle collections, quiet or not.
 const IDLE_GC_LONGEST: Duration = Duration::from_secs(5);
+
+/// The longest time between idle collections while display frames come
+/// one after another (an animation, a frame callback every frame): a
+/// collection there costs frames, one per [frame budget] it takes, so it
+/// waits for the frames to stop (then [`IDLE_GC_QUIET`]) up to this long.
+/// Detached subtrees keep their views until then.
+///
+/// [frame budget]: nsh_core::time::FRAME
+const IDLE_GC_LONGEST_ANIMATING: Duration = Duration::from_secs(30);
+
+/// How long after a display frame frames still count as continuous: a few
+/// frames at 60 Hz, so a frame skipped under load does not end it.
+const ANIMATING_GAP: Duration = Duration::from_millis(100);
 
 /// The shortest time between two deliveries of mouse motion: a frame at
 /// 120 Hz. Mice report moves far more often (up to 1000 Hz), and a handler
@@ -968,6 +983,9 @@ impl nsh_core::runtime::UpdaterHost for UpdaterOverNetwork {
         from: u64,
         sink: nsh_core::runtime::UpdaterSink<'_>,
     ) -> Result<(), String> {
+        if let Some(get) = nsh_core::runtime::updater_transport() {
+            return get(url, from, sink);
+        }
         const MAX_REDIRECTS: usize = 20;
         let mut current = url.to_owned();
         for hops in 0..=MAX_REDIRECTS {
@@ -2441,6 +2459,9 @@ struct Driver<M: TextEngine + 'static> {
     /// When a message or a due timer last gave the engine work
     /// ([`IDLE_GC_QUIET`]).
     last_active: Instant,
+    /// When the platform's last display frame ran on the engine
+    /// ([`IDLE_GC_LONGEST_ANIMATING`]).
+    last_display_frame: Option<Instant>,
     /// The queue of the JS calls Rust posts: its notify wakes the engine,
     /// as the core's task notify does ([`LocalEngine::set_wake`]).
     posts: nsh_core::element::Posts,
@@ -2730,6 +2751,7 @@ impl<M: TextEngine + 'static> Driver<M> {
             stopped: false,
             last_gc: Instant::now(),
             last_active: Instant::now(),
+            last_display_frame: None,
             posts: posts.clone(),
             clock: config.clock.clone(),
             context: config.context.clone(),
@@ -2918,6 +2940,9 @@ impl<M: TextEngine + 'static> Driver<M> {
     /// Handles one message; false on shutdown.
     fn handle(&mut self, message: Message, rx: &Receiver<Message>) -> bool {
         self.last_active = Instant::now();
+        if matches!(message, Message::Frame) {
+            self.last_display_frame = Some(self.last_active);
+        }
         match message {
             Message::Advance(by, done) => {
                 let running = self.advance(by, rx, self.clock.moves_with_frames());
@@ -3191,9 +3216,18 @@ impl<M: TextEngine + 'static> Driver<M> {
 
     /// When the next idle collection may run: a second after the last, once
     /// the engine has been quiet for [`IDLE_GC_QUIET`] (or at the latest
-    /// [`IDLE_GC_LONGEST`] after the last).
+    /// [`IDLE_GC_LONGEST`] after the last, [`IDLE_GC_LONGEST_ANIMATING`]
+    /// while display frames come one after another).
     fn next_gc(&self) -> Instant {
-        let quiet = (self.last_active + IDLE_GC_QUIET).min(self.last_gc + IDLE_GC_LONGEST);
+        let animating = self
+            .last_display_frame
+            .is_some_and(|at| at.elapsed() < ANIMATING_GAP);
+        let longest = if animating {
+            IDLE_GC_LONGEST_ANIMATING
+        } else {
+            IDLE_GC_LONGEST
+        };
+        let quiet = (self.last_active + IDLE_GC_QUIET).min(self.last_gc + longest);
         (self.last_gc + IDLE_GC_INTERVAL).max(quiet)
     }
 
@@ -3204,10 +3238,16 @@ impl<M: TextEngine + 'static> Driver<M> {
             && self.state.committed_since_gc
             && Instant::now() >= self.next_gc()
         {
-            let start = self.state.trace.then(Instant::now);
+            let start = (self.state.trace || self.state.perf.is_some()).then(Instant::now);
             script.collect_garbage();
             if let Some(start) = start {
-                log::info!(target: "nsh::perf", "gc: {}µs", start.elapsed().as_micros());
+                let pause = start.elapsed();
+                if self.state.trace {
+                    log::info!(target: "nsh::perf", "gc: {}µs", pause.as_micros());
+                }
+                if let Some(monitor) = &self.state.perf {
+                    monitor.record_gc(pause);
+                }
             }
             // What the app holds, for the performance monitor: read here,
             // when the heap was just walked and nothing waits.
@@ -3732,6 +3772,19 @@ impl<M: TextEngine> State<M> {
         let mut commit = std::mem::take(&mut self.perf_commit);
         if commit.ops > 0 || commit.items > 0 {
             commit.js = busy.saturating_sub(commit.layout);
+            // Each record as the monitor takes it. Its percentiles span the
+            // last few seconds (`perf::COMMIT_WINDOW`): with this a trace
+            // can give them for a stretch of its own.
+            if self.trace {
+                log::info!(
+                    target: "nsh::perf",
+                    "record: js {}µs, layout {}µs, {} ops, {} items",
+                    commit.js.as_micros(),
+                    commit.layout.as_micros(),
+                    commit.ops,
+                    commit.items,
+                );
+            }
             monitor.record_commit(commit);
         }
     }
@@ -4192,7 +4245,6 @@ fn ui_environment(env: &Environment, window: Size<Points>) -> nsh_core::element:
         canvas_render: env.canvas_render,
         share: env.share,
         app_settings: env.app_settings,
-        auth_session: env.auth_session,
         scheme_links: env.scheme_links(),
         file_requests: env.file_requests,
         notifications: env.notifications,
@@ -4402,8 +4454,16 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
             if event == EventKind::CaretMove {
                 state.core.locate_caret(id, &mut payload);
             }
+            // The core knows the list rows the selection's ends are in,
+            // the runtime the keys of its lists' items; rows of other
+            // lists go by their index.
             if event == EventKind::SelectionChange {
                 state.core.locate_selection(id, &mut payload);
+                state.core.name_selection_ends(&mut payload, |list, index| {
+                    script.map_or(nsh_core::selection::ListItemKey::NotMine, |s| {
+                        s.list_item_key(list, index)
+                    })
+                });
             }
             if event == EventKind::Paste {
                 payload = payload.into_paste();

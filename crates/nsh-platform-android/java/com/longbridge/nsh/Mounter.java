@@ -313,8 +313,8 @@ final class Mounter {
         tapEndsSelection = false;
     }
 
-    /** The outermost selectable view {@code text} is in (an area inside another is part of it), or null. */
-    SelectableView selectableViewOf(TextBox text) {
+    /** The outermost selectable view {@code text} is or is in (an area inside another is part of it), or null. */
+    SelectableView selectableViewOf(View text) {
         if (selectableViews.size() == 0) return null;
         SelectableView outer = null;
         for (Object v = text; v instanceof View; v = ((View) v).getParent()) {
@@ -407,8 +407,8 @@ final class Mounter {
      * none) may navigate to {@code url} (the app's capabilities). The origin
      * is compared in Rust.
      */
-    boolean allowsWebview(String url, String origin) {
-        return Native.allowsWebview(handle(), url, origin);
+    boolean allowsWebview(String url, String origin, String hosts) {
+        return Native.allowsWebview(handle(), url, origin, hosts);
     }
 
     /** Whether the running app's web pages may capture {@code kind} (its {@code webview.media}). */
@@ -2934,6 +2934,12 @@ final class Mounter {
                 }
                 break;
             }
+            case 69: {
+                // ref.selectAll(): every text of the selectable view v is or is in.
+                SelectableView area = v != null ? selectableViewOf(v) : null;
+                if (area != null) area.selectAll();
+                break;
+            }
             case 21: {
                 String name = string(objects, b.getInt());
                 String json = string(objects, b.getInt());
@@ -3059,19 +3065,6 @@ final class Mounter {
                 Share.show(context, request);
                 break;
             }
-            case 59: {
-                // `encode.rs` `Command::AuthSession`: the request, the page, the callback scheme, ephemeral.
-                int request = b.getInt();
-                String url = (String) objects[b.getInt()];
-                String scheme = (String) objects[b.getInt()];
-                boolean ephemeral = b.getInt() != 0;
-                AuthSession.open(context, this, request, url, scheme, ephemeral);
-                break;
-            }
-            case 61:
-                // `encode.rs` `Command::CloseAuthSession`: the request the app closed.
-                AuthSession.close(b.getInt());
-                break;
             case 26: {
                 int request = b.getInt();
                 String url = (String) objects[b.getInt()];
@@ -3249,14 +3242,16 @@ final class Mounter {
                 String injected = optString(b, objects), before = optString(b, objects), ua = optString(b, objects);
                 boolean scroll = b.getInt() != 0, js = b.getInt() != 0, incognito = b.getInt() != 0;
                 boolean zoomable = b.getInt() != 0;
-                String allowOrigin = optString(b, objects);
+                String allowOrigin = optString(b, objects), allowNavigation = optString(b, objects);
                 if (v instanceof WebBox) {
-                    ((WebBox) v).configure(source, injected, before, ua, scroll, js, incognito, zoomable, allowOrigin);
+                    ((WebBox) v).configure(source, injected, before, ua, scroll, js, incognito, zoomable, allowOrigin,
+                            allowNavigation);
                 }
                 break;
             }
             case 4: {
                 String source = optString(b, objects);
+                String poster = optString(b, objects);
                 boolean paused = b.getInt() != 0, muted = b.getInt() != 0;
                 float volume = b.getFloat(), rate = b.getFloat();
                 boolean repeat = b.getInt() != 0;
@@ -3265,8 +3260,8 @@ final class Mounter {
                 float interval = b.getFloat();
                 int audioSession = b.getInt();
                 if (v instanceof VideoBox) {
-                    ((VideoBox) v).configure(source, paused, muted, volume, rate, repeat, mode, controls, interval,
-                            audioSession);
+                    ((VideoBox) v).configure(source, poster, paused, muted, volume, rate, repeat, mode, controls,
+                            interval, audioSession);
                 }
                 break;
             }
@@ -3932,8 +3927,9 @@ final class Mounter {
     }
 
     /** See {@link Native#touch}. */
-    void touches(int phase, int[] ids, int[] targets, int[] pathLengths, int[] paths, float[] coords, boolean[] changed, long time, int activated) {
-        Native.touch(handle(), phase, ids, targets, pathLengths, paths, coords, changed, time, activated);
+    void touches(int phase, int[] ids, int[] targets, int[] pathLengths, int[] paths, float[] coords, double[] samples,
+            boolean[] changed, long time, int activated) {
+        Native.touch(handle(), phase, ids, targets, pathLengths, paths, coords, samples, changed, time, activated);
     }
 
     /**

@@ -61,6 +61,16 @@ observes the session's updated `composing` value and any committed text, so an a
 while composition is active and release it when it ends. Starting or canceling composition can keep the document
 and its revision unchanged; `onChange` reports document edits.
 
+`onReadonlyInput()` fires when someone types into an editor that cannot be edited (`editable={false}`,
+the editor's `editable: false` / `setEditable(false)`, or a plugin's `editable`), which stays out of the document: a hardware keyboard's characters, a software keyboard's
+typing and an input method's commit, once per change. An app can use it to offer editing, as a
+reading view that turns to editing when someone starts typing. Text the app inserts itself, deleting and pasting are not reported. A keyboard that replaces a word it typed
+(autocorrect, a picked suggestion) fires again, so treat it as a sign of typing, not a character count.
+
+```tsx
+<RichEditor editor={editor} editable={false} onReadonlyInput={() => showEditHint()} />
+```
+
 ## Styling
 
 The editor draws the document with the app's look: `classes` and `styles` style its parts (`root`, `content`, `caret`,
@@ -191,8 +201,8 @@ is copied with `transform_copied`.
 
 Files reach the app, which decides what they become (an image node, an attachment, a link to an uploaded copy); the
 editor inserts nothing for them and keeps its selection, where the app inserts what it makes of them. A paste of
-images or of files copied in a file manager calls `onPasteFiles` with `{ files, uris }`: `files` the images with
-their bytes, `uris` the copied files' `file:` URLs. On the desktops, files dragged from another application onto
+images or of files copied in a file manager calls `onPasteFiles` with `{ paste: { files, uris } }`: `files` the images with
+their bytes (`{ name, mime, data }`), `uris` the copied files' `file:` URLs. On the desktops, files dragged from another application onto
 the editor call its `onFileDrop` with `{ uris, mimeTypes }`, as a [view's file drops](./view.md#desktop-file-drops)
 do, and `onFileDragEnter` / `onFileDragLeave` follow the drag, for a hint such as "Release to attach". Without
 `onFileDrop` the editor leaves dropped files to the view around it that listens.
@@ -204,7 +214,7 @@ the text goes in as a paste of it would (with its HTML when the drag has some, t
 ```tsx
 <RichEditor
   editor={editor}
-  onPasteFiles={({ files }) => attach(files)}
+  onPasteFiles={({ paste }) => attach(paste.files)}
   onFileDrop={({ uris, mimeTypes }) => attachFiles(uris, mimeTypes)}
 />
 ```
@@ -321,13 +331,44 @@ editor.run(command("toggleBold"));
 ```
 
 `StarterKit` brings `Document`, `Paragraph`, the text node, `Heading`, `Blockquote`, `BulletList`, `OrderedList`,
-`ListItem`, `TaskList`, `TaskItem`, `CodeBlock`, `HardBreak`, `HorizontalRule`, `RichImage` (Tiptap's `Image`),
+`ListItem`, `TaskList`, `TaskItem`, `CodeBlock`, `CodeBlockHighlight`, `HardBreak`, `HorizontalRule`, `RichImage` (Tiptap's `Image`),
 `Bold`, `Italic`, `Strike`, `Code`, `Underline`, `RichLink` (Tiptap's `Link`), `Highlight`, `Subscript`, `Superscript`, `RichTextStyle` (Tiptap's `TextStyle`),
 `TextAlign`, `History`, `TrailingNode`, `Typography` and `ListKeymap`. An option named as one set to `false` leaves
 it out, an object configures it (`heading: { levels }`, `history: { depth }`, `textAlign: { types }`,
 `codeBlock: { enableTabIndentation }`). Each class's `configure(options)` and `extend({...})` make a
 `RichExtension`, which has `name`, `type`, `priority` and `options`. Every editor also gets the core keymap (Enter,
 Backspace, Delete, select all).
+
+Code blocks that name a language (` ```rust `, `toggleCodeBlock({ language: "rust" })`) are colored as `TextView`
+colors fenced code, with the same syntaxes and palette: that is `CodeBlockHighlight`, which plays the part of Tiptap's
+`CodeBlockLowlight` without a highlighter to pass in. `StarterKit.configure({ codeBlockHighlight: false })` leaves
+code plain. Typing in a long block does not wait for the colors: they are worked out off the engine thread and arrive
+a moment later. On the web the syntaxes come from the page once, the first time a block needs them, shared with
+`TextView`; they are not in the first download. Without the platform's feature `highlight` code stays plain.
+A block's `language` takes the names highlight.js and lowlight use (`objectivec`, `plist`, `shellsession`, ...), and a
+whole fence info string is read by its first word (`ts title="a.ts"`, `rust,ignore`), so documents from other editors
+keep their colors.
+
+A block that names no language stays plain, unless the extension names one for it. `defaultLanguage` (Tiptap's
+option) gives every such block a language: `CodeBlockHighlight.configure({ defaultLanguage: "rust" })`, or
+`StarterKit.configure({ codeBlockHighlight: { defaultLanguage: "rust" } })`. The language only colors the block: the
+document keeps no language, so collaborators and saved content see no change.
+
+In Rust it is `kit::code_block_highlight()`, part of `kit::starter_kit()` and of `starter::plugins`.
+`kit::code_block_highlight_with(options)` also takes `CodeBlockHighlightOptions`: `default_language`, and
+`detect_language` (an `Arc<dyn Fn(&str) -> Option<String> + Send + Sync>`), the app's own guess of a block's language
+from its code, as Tiptap's `CodeBlockLowlight` guesses one when no `defaultLanguage` is set. A block's own `language` comes first, then `detect_language`, then
+`default_language`; when none gives one, the block stays plain. `detect_language` is asked once each time an unlabelled
+block's code changes, on the engine thread, so keep it quick. It is Rust only: functions in a built-in extension's TSX
+options would run JS while typing.
+
+```rust
+let mut options = CodeBlockHighlightOptions::default();
+options.detect_language = Some(Arc::new(|code: &str| {
+    code.trim_start().starts_with("fn ").then(|| "rust".to_owned())
+}));
+let highlight = kit::code_block_highlight_with(options);
+```
 
 Each extension adds Tiptap's commands, which `command(name, args)` runs: `toggleBold`, `setItalic`,
 `unsetStrike`, `toggleHeading({ level })`, `setParagraph`, `toggleBlockquote`, `toggleBulletList`,
@@ -655,6 +696,20 @@ While the document can be edited:
 - The table the selection is in shows grips (`tableGrip`) on its top border over each column and on its left border
   beside each row. Pressing one selects that column or row; dragging it on desktops shows where it drops
   (`tableDropIndicator`) and moves it there on release.
+- A grip pressed and let go without dragging (a tap on touch screens) calls `onTableMenu` after it selected its
+  column or row, with `{ table, row, column, bounds }`: `table` is the position before the table, `row` is set for a
+  row's grip and `column` for a column's, and `bounds` is the grip's box in the root view, where the app opens its own
+  menu for that row or column. A drag moves the row or column and does not call it, nor does a
+  release after the grip's table or line went away.
+
+```tsx
+<RichEditor
+  editor={editor}
+  onTableMenu={({ table, row, column, bounds }) =>
+    openLineMenu({ table, row, column, anchor: bounds })
+  }
+/>
+```
 
 ```tsx
 <RichEditor

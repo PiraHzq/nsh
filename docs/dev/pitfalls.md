@@ -290,7 +290,13 @@ Things that were found the hard way. Read the section of the area you change bef
   safe area (the bottom of whatever bar UIKit shows) as their header (`Core::set_screen_header`), and the stack's bar gets
   the screen's appearance as well as its navigation item.
 - **Catalyst's Mac idiom presents page / form sheets as macOS sheets** at a default size wider than a 390pt window: they get
-  the window's size as `preferredContentSize`. Standalone apps have a white root view (UIKit windows are black).
+  the window's size as `preferredContentSize`.
+- **UIKit resizes the standalone window before the surface commits its new layout**: the window and root controller's
+  view keep the previous backdrop until that layout is ready, then use the first mounted child's opaque background
+  if it covers the surface without rounded corners, a clip path, or a mask. Animated color and coverage changes
+  follow the same rule; native keyframes and active opacity or transform animations do not supply a backdrop.
+  A finite native animation that blocks the current backdrop is rechecked on display frames until it settles.
+  The fallback is white in either appearance, since default text is black.
 - **iOS clamps shared corner radii itself** (`rounded-full` is 9999): Core Animation does not reliably clamp a `cornerRadius`
   over half the short side, so `decor.rs` clamps it and clamps again when the size changes.
 - **iOS, a side bar's safe area reaches past the bar**: a strip the device keeps along one side of the screen (a
@@ -483,7 +489,12 @@ Things that were found the hard way. Read the section of the area you change bef
   (`getGlobalVisibleRect`) records nothing. Four glass views of about the screen's size, without shadows, slid at
   34 ms a frame on an emulator, 12 ms after. Every blurred view still records and blurs its backdrop again on
   every frame, also when nothing behind it changed: a drawer sliding over blurred panes makes each of them blur
-  again (31 ms a frame on the emulator, 17 ms with the panes not blurred).
+  again (31 ms a frame on the emulator, 17 ms with the panes not blurred). A blurred view's display list holds its
+  backdrop node, so a backdrop that records it holds everything behind it a second time, and hwui's `prepareTree`
+  walks a node once for every display list that draws it: the five stacked layers of a progressive blur (the
+  gallery's Styles page) walked the window 31 times a frame, 37 ms of a Pixel 10 Pro's RenderThread while scrolling
+  and 808 ms in the first frame. A view that draws nothing but its blurred backdrop (`Backdrop.onlyBlurs`) is left
+  out of the backdrops behind it, which then blur what lies behind the whole stack: about 3 ms a frame.
 - **Android, hidden views lose their display lists**: HWUI drops the display list of a RenderNode no longer drawn,
   and `setVisibility` tells every view under the one that changes, whose background `Drawable.setVisible` calls
   `invalidateSelf`. A whole screen hidden and shown again therefore records all of its views again (22–36 ms for the
@@ -796,6 +807,12 @@ Things that were found the hard way. Read the section of the area you change bef
   sinks, wraps a line per character and soon holds such text. `TextArea` answers its visible part instead
   (`text_input.rs`).
 
+- **`NSTextView::setDefaultParagraphStyle:` updates neither `typingAttributes` nor existing `textStorage` attributes**:
+  a multiline input sets all three so typing into an empty view or at index 0 keeps its line height. Undo and redo
+  restore attributed substrings: after a restyle, reapply the current paragraph style to the restored range before
+  layout. A font or color change can split the effective range even when the paragraph style is unchanged; compare
+  its `longestEffectiveRange` before writing (`text_input.rs`).
+
 - **Closing a window synchronously calls its delegate**, which stops the surface and clears its mounter.
   Commands applied while the mounter is borrowed defer window closure to the next main-queue turn
   (`system.rs`, `ExitApp`), so teardown can borrow the mounter again.
@@ -1053,6 +1070,11 @@ Things that were found the hard way. Read the section of the area you change bef
   Apple Color Emoji at 14px measures 18 px on canvas and draws 14 at DPR 2 (16.8 at 1.25; Chrome 156 on macOS;
   emulating the ratio over the DevTools protocol does not show it, `--force-device-scale-factor` does), so a line of
   22 emoji was laid out 88 px too wide. Emoji clusters are measured in the DOM (`text.rs`, `emoji_excess`).
+- **Canvas `measureText` hints a font at a pixel ratio of 1, the DOM at the screen's**: a hinted font rounds its
+  advances to device pixels, so at 1.25 or 1.5 the DOM draws it narrower or wider than canvas measures it. NSimSun,
+  Chrome's `monospace` and its fallback for Han on Chinese Windows, measures 7 px per character at 13px and draws 6.5
+  at DPR 1.5 (Chrome 158 on Windows, `--force-device-scale-factor`), so runs of code stood up to 9 px apart. Canvas measures at
+  the font size times the ratio and scales back (`measureWidth` in `nsh.js`), which gives the DOM's width.
 - **A field paints an input method's marks on its composing text whatever its colors**: an editor's sink (transparent
   text, no caret, 1 px wide) showed a bar at the caret while composing (Chrome 156, `Input.imeSetComposition`). A
   field that shows nothing is `opacity: 0` (`encode/input.rs`, `shows_nothing`); it keeps the focus and the input

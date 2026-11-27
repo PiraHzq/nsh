@@ -34,7 +34,7 @@ its parents and rounded corners, but NSH content drawn over it (a dialog, a shee
 WebView2 Runtime (part of Windows 11; installed with Edge on Windows 10), else it shows a placeholder;
 `baseUrl` for HTML, `scrollable` and `allowsBackForwardNavigationGestures` are not supported. Videos are
 ordinary content (clipped, transformed and covered like any view) and play the formats the installed Media Foundation
-codecs decode; `rate` works, there is no poster, and the control bar always shows while `controls` is on.
+codecs decode; `rate` works, and the control bar always shows while `controls` is on.
 
 ## WebView
 
@@ -84,6 +84,7 @@ In Rust each prop is a builder method in snake case (`injected_java_script`, `ja
 | `html` | `string` | | Inline HTML, shown instead of `src`. |
 | `baseUrl` | `string` | | What `html`'s relative URLs resolve against. It needs the same grant as a page there (`webview.hosts`); without it the HTML loads with no base URL and `onError` reports `ERR_ACCESS_DENIED`. |
 | `allowOrigin` | `string` | | One more origin this web view may show and navigate to besides `webview.hosts`, for an origin known only while the app runs (a server the user named): `scheme://host[:port]`, `http` or `https`, matched exactly (same scheme, host and port; never a subdomain). Needs `"runtimeOrigin": true` in [`capabilities.webview`](../docs/sandbox-and-capabilities.md#webview); another value is refused with a message. Set in the same render as `src`, it applies to it; changed later, from the next navigation. Other web views and the windows a page opens do not have it. |
+| `allowNavigation` | `string[]` | | Narrows the hosts this web view may show and navigate to, with the same host patterns as `webview.hosts` (`*`, `*.example.com`, a host name). A page outside them is refused before its request is made and reported to `onError` with `code` `ERR_ACCESS_DENIED` and its `url`. It never widens the app's grant, an empty list refuses every web page, and a pattern that does not read is refused with a message. Other schemes (`about:blank`, the app's files and URL schemes) keep the app's own rules. |
 | `injectedJavaScript` | `string` | | Runs after each page loads. |
 | `injectedJavaScriptBeforeContentLoaded` | `string` | | Runs before each page's own scripts. |
 | `javaScriptEnabled` | `boolean` | `true` | Pages run scripts. |
@@ -620,6 +621,7 @@ In Rust, `video(url)` makes the player (the URL a value, a signal or a closure) 
 | Prop | Type | Default | Description |
 |---|---|---|---|
 | `src` | `string` | | The video's URL. |
+| `poster` | `string` | | An image shown while the video loads, until its first frame is ready. |
 | `paused` | `boolean` | `false` | Playback is paused. |
 | `muted` | `boolean` | `false` | No sound. |
 | `volume` | `number` | `1` | 0..1. |

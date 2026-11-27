@@ -85,6 +85,8 @@ struct Area {
     controllers: [gtk::EventController; 2],
     /// The selected text last reported to its `onSelectionChange`.
     reported: String,
+    /// The ends last reported with it (`SelectionModel::ends`).
+    reported_ends: Option<[(u64, u32); 2]>,
 }
 
 /// The mouse pressed in an area.
@@ -419,6 +421,7 @@ impl Area {
             dirty: true,
             controllers: [keys.upcast(), focus.upcast()],
             reported: String::new(),
+            reported_ends: None,
         }
     }
 
@@ -783,6 +786,28 @@ fn select_all(surface: &Rc<Surface>, id: NodeId) {
     }
 }
 
+/// `ref.selectAll()` on `view` (`Command::SelectAll`): selects every text
+/// of the selectable view `view` is or is inside, as Ctrl+A does, and
+/// clears the other areas' selections as a press there would.
+pub(crate) fn select_in(surface: &Rc<Surface>, view: &NshView) {
+    let Some(area) = area_of(view) else {
+        return;
+    };
+    let id = area.id();
+    let others: Vec<NodeId> = surface
+        .selection
+        .areas
+        .borrow()
+        .iter()
+        .filter(|&(&other, a)| other != id && !a.model.is_empty())
+        .map(|(&other, _)| other)
+        .collect();
+    for other in others {
+        clear(surface, other);
+    }
+    select_all(surface, id);
+}
+
 /// `ref.clearSelection()` on `view` (`Command::ClearSelection`): clears
 /// the selections of the areas that are `view`, inside it or around it.
 pub(crate) fn clear_in(surface: &Surface, view: &NshView) {
@@ -870,34 +895,40 @@ fn apply(surface: &Surface, id: NodeId, area: &NshView, texts: &Texts) {
     report(surface, id, area, texts);
 }
 
-/// Reports area `id`'s selected text to its `onSelectionChange` when it
-/// changed (no borrows held: the handler may run a batch).
+/// Reports area `id`'s selected text and its ends to its
+/// `onSelectionChange` when they changed (no borrows held: the handler may run a batch).
 fn report(surface: &Surface, id: NodeId, area: &NshView, texts: &Texts) {
     if !area.state().events.contains(EventKind::SelectionChange) {
         return;
     }
-    let (text, start) = {
+    let (text, start, ends) = {
         let mut areas = surface.selection.areas.borrow_mut();
         let Some(a) = areas.get_mut(&id) else { return };
-        let (text, start) = if a.model.is_empty() {
-            (String::new(), 0)
+        let (text, start, ends) = if a.model.is_empty() {
+            (String::new(), 0, None)
         } else {
-            (a.model.text(texts), a.model.start_offset(texts))
+            (
+                a.model.text(texts),
+                a.model.start_offset(texts),
+                a.model.ends(texts),
+            )
         };
-        if text == a.reported {
+        if text == a.reported && ends == a.reported_ends {
             return;
         }
         a.reported.clone_from(&text);
-        (text, start)
+        a.reported_ends = ends;
+        (text, start, ends)
     };
-    surface.event(
-        id,
-        EventKind::SelectionChange,
-        EventPayload::Map(vec![
-            ("text", PayloadValue::Str(text)),
-            ("start", PayloadValue::Number(f64::from(start))),
-        ]),
-    );
+    let mut fields = vec![
+        ("text", PayloadValue::Str(text)),
+        ("start", PayloadValue::Number(f64::from(start))),
+    ];
+    // The core places them in list items.
+    if let Some(ends) = ends {
+        fields.extend(nsh_core::selection::end_fields(ends));
+    }
+    surface.event(id, EventKind::SelectionChange, EventPayload::Map(fields));
 }
 
 /// Takes the highlight off the texts of `old` that are not in `keep`.

@@ -29,7 +29,7 @@ GStreamer 插件；不支持 `rate`（始终以 1× 播放），`onEnd` 只对�
 在 [Windows](./windows.md) 上，Web 视图是位于子窗口中的 WebView2 控件，跟随它的视图移动：它会被父视图和圆角裁剪，但绘制在它上方的
 NSH 内容（对话框、sheet）会被它遮住。它需要 WebView2 Runtime（Windows 11 自带，Windows 10 上随 Edge 安装），否则显示占位视图；
 不支持 HTML 的 `baseUrl`、`scrollable` 和 `allowsBackForwardNavigationGestures`。视频是普通内容（像其他视图一样被裁剪、
-变换和遮挡），能播放哪些格式取决于已安装的 Media Foundation 解码器；`rate` 可用，没有封面图（poster），开启 `controls` 时控制栏始终显示。
+变换和遮挡），能播放哪些格式取决于已安装的 Media Foundation 解码器；`rate` 可用，开启 `controls` 时控制栏始终显示。
 
 ## WebView
 
@@ -79,6 +79,7 @@ pub fn App() -> impl IntoElement {
 | `html` | `string` | | 内联 HTML，代替 `src` 显示。 |
 | `baseUrl` | `string` | | `html` 中相对 URL 的解析基准。它需要与该地址的页面相同的授权（`webview.hosts`）；未授权时 HTML 不带基准 URL 加载，`onError` 报告 `ERR_ACCESS_DENIED`。 |
 | `allowOrigin` | `string` | | 除 `webview.hosts` 之外，这个网页视图还可以显示和导航到的一个源，用于应用运行时才知道的源（例如用户填写的服务器）：`scheme://host[:port]`，`http` 或 `https`，精确匹配（相同的 scheme、主机和端口，不包括子域名）。需要在 [`capabilities.webview`](../docs/sandbox-and-capabilities.md#webview) 中声明 `"runtimeOrigin": true`；其他值会被拒绝并给出提示。与 `src` 在同一次渲染中设置时，对这个 `src` 生效；之后再改，从下一次导航开始生效。其他网页视图和页面打开的窗口都没有它。 |
+| `allowNavigation` | `string[]` | | 收窄这个网页视图可以显示和导航到的主机，写法与 `webview.hosts` 相同（`*`、`*.example.com` 或主机名）。不在其中的页面在发出请求前就被拒绝，并通过 `onError` 报告，`code` 为 `ERR_ACCESS_DENIED`，带上 `url`。它不会放宽应用的授权；空列表拒绝所有网页；无法解析的模式会被拒绝并给出提示。其他 scheme（`about:blank`、应用自己的文件和 URL scheme）仍按应用自己的规则。 |
 | `injectedJavaScript` | `string` | | 每个页面加载完成后运行。 |
 | `injectedJavaScriptBeforeContentLoaded` | `string` | | 在每个页面自己的脚本之前运行。 |
 | `javaScriptEnabled` | `boolean` | `true` | 页面可以运行脚本。 |
@@ -606,6 +607,7 @@ pub fn player() -> impl IntoElement {
 | 属性 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `src` | `string` | | 视频的 URL。 |
+| `poster` | `string` | | 视频加载时显示的图片，直到第一帧就绪。 |
 | `paused` | `boolean` | `false` | 暂停播放。 |
 | `muted` | `boolean` | `false` | 静音。 |
 | `volume` | `number` | `1` | 0..1。 |

@@ -345,6 +345,9 @@ pub(crate) fn encode(batch: MountBatch, web_generation: u64) -> Encoded {
                 e.int(id as i32);
                 canvas(&mut e, &drawing);
             }
+            // GPU views draw nothing on this backend yet
+            // (`docs/dev/gpu-views.md`).
+            MountItem::GpuView { .. } => {}
             MountItem::Shader { id, layer } => {
                 // Java learns what the view shows (whether a shader, its
                 // role, how far it overflows, which pictures it reads); the
@@ -568,6 +571,7 @@ pub(crate) fn encode(batch: MountBatch, web_generation: u64) -> Encoded {
                     Command::Focus => e.int(0),
                     Command::Blur => e.int(1),
                     Command::ClearSelection => e.int(62),
+                    Command::SelectAll => e.int(69),
                     Command::ScrollTo { x, y, animated } => {
                         e.int(2);
                         e.float(x.0);
@@ -797,20 +801,6 @@ pub(crate) fn encode(batch: MountBatch, web_generation: u64) -> Encoded {
                         for file in sheet.files {
                             e.string(file);
                         }
-                    }
-                    // `AuthSession.java`: the request, the page, the callback
-                    // scheme and whether it is ephemeral.
-                    Command::AuthSession { id, page } => {
-                        e.int(59);
-                        e.int(id as i32);
-                        e.string(page.url);
-                        e.string(page.callback_scheme);
-                        e.bool(page.ephemeral);
-                    }
-                    // `AuthSession.java`: the request the app closed.
-                    Command::CloseAuthSession(id) => {
-                        e.int(61);
-                        e.int(id as i32);
                     }
                     // `ClipboardReads.java`: the clip's first image
                     // (`content:` URI) as a `data:` URI and its size, read
@@ -1454,10 +1444,14 @@ fn native_props(e: &mut Encoded, p: &NativeProps) {
             // Its one written form, which `Native.allowsWebview` reads back.
             let origin = w.allow_origin.as_ref().map(ToString::to_string);
             e.opt_string(origin.as_deref());
+            // One pattern per line, which `Native.allowsWebview` reads back.
+            let hosts = w.allow_navigation.as_ref().map(ToString::to_string);
+            e.opt_string(hosts.as_deref());
         }
         NativeProps::Video(v) => {
             e.int(4);
             e.opt_string(v.source.as_deref());
+            e.opt_string(v.poster.as_deref());
             e.bool(v.paused);
             e.bool(v.muted);
             e.float(v.volume);

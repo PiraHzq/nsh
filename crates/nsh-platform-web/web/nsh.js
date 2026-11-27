@@ -973,6 +973,26 @@ function measureContext() {
   return canvas.getContext("2d");
 }
 
+/**
+ * The width of `text` in CSS `font` as the DOM draws it, measured in `cx`.
+ * Canvas text places glyphs as at a pixel ratio of 1, the DOM at the page's:
+ * a hinted font rounds its advances to device pixels, so at 1.25 or 1.5 the
+ * DOM draws it narrower or wider than canvas measures it (NSimSun, Chrome's
+ * `monospace` on Chinese Windows, at 13px: 6.5 against 7 per character).
+ * Laid out at canvas widths, its runs then stand apart or overlap. At the
+ * ratio's font size, and scaled back, canvas measures the DOM's width.
+ */
+function measureWidth(cx, font, text) {
+  const ratio = typeof devicePixelRatio === "number" && devicePixelRatio > 0 ? devicePixelRatio : 1;
+  if (ratio === 1) {
+    cx.font = font;
+    return cx.measureText(text).width;
+  }
+  // `css_font` puts the size first: `[italic ]<weight> <size>px <family>`.
+  cx.font = font.replace(/(\d*\.?\d+)px/, (_, size) => `${size * ratio}px`);
+  return cx.measureText(text).width / ratio;
+}
+
 /** The span `measureNumericText` measures in (one for the page's players). */
 let numericSpan = null;
 
@@ -1331,15 +1351,13 @@ class Player {
             this.measureUses = 0;
             this.measure = measureContext();
           }
-          this.measure.font = this.str(fp, fl);
-          return this.measure.measureText(this.str(tp, tl)).width;
+          return measureWidth(this.measure, this.str(fp, fl), this.str(tp, tl));
         },
         measure_numeric_text: (fp, fl, np, nl, tp, tl) => {
           const font = this.str(fp, fl), text = this.str(tp, tl);
           const width = measureNumericText(font, this.str(np, nl), text);
           if (width != null) return width;
-          this.measure.font = font;
-          return this.measure.measureText(text).width;
+          return measureWidth(this.measure, font, text);
         },
         text_cluster_boxes: (fp, fl, np, nl, spacing, tp, tl, rp, op, count) => {
           const input = new Uint32Array(this.wasm.memory.buffer, rp, count * 2);
@@ -2258,7 +2276,13 @@ class Player {
     this.frame = requestAnimationFrame((now) => {
       this.frame = 0;
       this.frameAt = performance.now();
-      this.call((w) => w.nsh_frame(this.frameTime(now), 1));
+      // What the frame changes is drawn in it (`drawSoon`).
+      this.inFrame = true;
+      try {
+        this.call((w) => w.nsh_frame(this.frameTime(now), 1));
+      } finally {
+        this.inFrame = false;
+      }
     });
   }
 
@@ -4126,6 +4150,8 @@ class Player {
    * the root with a screen effect) as they show without the effect.
    */
   paintHost(cx, host, r, stop, owner) {
+    // A canvas changed since the last frame shows its new drawing.
+    this.flushDraws();
     this.watchPaint();
     // What changed since the last picture: its styles are read again.
     this.touchAll(this._paintObserver.takeRecords());
@@ -5488,7 +5514,10 @@ class Player {
     const el = this.view(id);
     if (!el || el._kind !== "scroll" || el._horizontal) return;
     this.ensureLayer(el);
+    const was = !!el._refreshing;
     el._refreshing = refreshing;
+    if (refreshing) el._refreshDismissing = false;
+    else if (was && el._pull > 0) el._refreshDismissing = true;
     if (!el._pulling) {
       if (refreshing && el.scrollTop <= 0.5) this.animatePull(el, this.refreshSpace(el));
       else if (!refreshing && el._pull > 0) this.animatePull(el, 0);
@@ -5531,6 +5560,7 @@ class Player {
       if (!start.pulling) {
         start.pulling = true;
         el._pulling = true;
+        if (!el._refreshing) el._refreshDismissing = false;
         cancelAnimationFrame(el._pullAnimation);
       }
       this.dragPull(el, v);
@@ -5564,6 +5594,7 @@ class Player {
     if (!el._refreshing && el._events.has("onRefresh") && el._pull >= this.refreshThreshold(el)) {
       // Shown right away, as UIRefreshControl does; JS turns it off.
       el._refreshing = true;
+      el._refreshDismissing = false;
       this.event(el._id, "onRefresh");
     }
     this.animatePull(el, el._refreshing && el._pull > 0 ? this.refreshSpace(el) : 0);
@@ -5572,6 +5603,7 @@ class Player {
   setPull(el, pull) {
     if (pull === el._pull) return;
     el._pull = pull;
+    if (pull <= 0) el._refreshDismissing = false;
     this.placeLayer(el);
     this.updateSpinner(el);
     this.scrolled(el);
@@ -5591,13 +5623,17 @@ class Player {
     el._pullAnimation = requestAnimationFrame(step);
   }
 
-  /** The spinner above the content: its spokes appear as it is pulled, and turn while refreshing. */
+  /** The spinner above the content: its spokes appear as it is pulled, turn while refreshing, and keep turning while fading out on dismiss. */
   updateSpinner(el) {
     // Off, the app draws its own (from `pullValue`).
     const shown = el._pull > 0 && !el._behavior?.refreshIndicator;
     let spinner = el._spinner;
     if (!shown) {
-      spinner?.classList.add("nsh-gone");
+      if (spinner) {
+        spinner.classList.add("nsh-gone");
+        spinner.classList.remove("spin", "full");
+        spinner.style.opacity = "";
+      }
       return;
     }
     if (!spinner) {
@@ -5609,13 +5645,16 @@ class Player {
       el.append(spinner);
     }
     spinner.classList.remove("nsh-gone");
-    spinner.style.top = `${el._pull - this.refreshSpace(el) / 2 - 10}px`;
-    const progress = el._refreshing ? 1 : Math.min(1, el._pull / this.refreshThreshold(el));
+    const space = this.refreshSpace(el);
+    spinner.style.top = `${el._pull - space / 2 - 10}px`;
+    const active = !!(el._refreshing || el._refreshDismissing);
+    const progress = active ? 1 : Math.min(1, el._pull / this.refreshThreshold(el));
     const count = Math.min(8, Math.ceil(progress * 8));
     [...spinner.children].forEach((spoke, i) => spoke.classList.toggle("nsh-hidden", i >= count));
     // Pulled all the way, the spokes fade behind the lead one.
     spinner.classList.toggle("full", progress >= 1);
-    spinner.classList.toggle("spin", !!el._refreshing);
+    spinner.classList.toggle("spin", active);
+    spinner.style.opacity = el._refreshDismissing ? String(Math.min(1, el._pull / space)) : "";
   }
 
 
@@ -5628,13 +5667,35 @@ class Player {
     this.drawSoon(el);
   }
 
+  /**
+   * Draws canvas view `el` once before the next paint. Each input event,
+   * timer or socket message is a task with a batch of its own, and several
+   * can come between two frames (pointer moves, a stream of updates): each
+   * replays the whole drawing, only the last of them is ever shown, and the
+   * replays hold the main thread the input waits on. So a change waits for
+   * the next frame, and the canvases changed before it draw once there. A
+   * change made in a frame (the engine's `nsh_frame` stepping an animated
+   * value) draws at the end of its callback, before that frame's paint: a
+   * `requestAnimationFrame` asked for there would come a frame late.
+   */
   drawSoon(el) {
-    if (el._drawQueued) return;
-    el._drawQueued = true;
-    queueMicrotask(() => {
-      el._drawQueued = false;
-      this.draw(el);
-    });
+    (this.drawQueue ??= new Set()).add(el);
+    if (this.drawQueued) return;
+    this.drawQueued = true;
+    const run = () => {
+      this.drawQueued = false;
+      this.flushDraws();
+    };
+    if (this.inFrame) queueMicrotask(run);
+    else requestAnimationFrame(run);
+  }
+
+  /** Draws the canvases waiting for a frame (`drawSoon`) now: a picture of them (`paintHost`) shows what they draw. */
+  flushDraws() {
+    const queue = this.drawQueue;
+    if (!queue?.size) return;
+    this.drawQueue = new Set();
+    for (const el of queue) this.draw(el);
   }
 
   draw(el) {
@@ -7498,11 +7559,19 @@ class Player {
     this.webNavigation(el, "onLoad", false);
   }
 
-  op_video([, id, src, paused, muted, volume, rate, repeat, fit, controls, progressInterval]) {
+  op_video([, id, src, poster, paused, muted, volume, rate, repeat, fit, controls, progressInterval]) {
     const el = this.view(id);
     const video = el?._video;
     if (!video) return;
     const url = src ? this.asset(src) : "";
+    // The poster shows until the first frame is ready (`loadeddata`), as
+    // on the other platforms, not until playback starts as `<video>`'s own.
+    const posterUrl = poster ? this.asset(poster) : "";
+    if (posterUrl !== el._poster || url !== el._src) {
+      el._poster = posterUrl;
+      if (posterUrl && (url !== el._src || video.readyState < 2)) video.poster = posterUrl;
+      else video.removeAttribute("poster");
+    }
     // `paused` is acted on when it changes (or for a new source): `play()`
     // on a video that ended starts it over, and one its controls paused
     // would play on, whenever another prop (the volume, say) changed.
@@ -7559,6 +7628,7 @@ class Player {
     });
     video.addEventListener("loadedmetadata", () =>
       emit("onLoad", { duration: video.duration || 0, width: video.videoWidth, height: video.videoHeight }));
+    video.addEventListener("loadeddata", () => video.removeAttribute("poster"));
     video.addEventListener("playing", () => {
       buffer(false);
       stopProgress();
@@ -7607,6 +7677,13 @@ class Player {
         const anchor = sel?.rangeCount ? sel.anchorNode : null;
         const area = anchor && this.areaOf(anchor.nodeType === 1 ? anchor : anchor.parentElement);
         if (el && area && (el.contains(area) || area.contains(el))) sel.removeAllRanges();
+        break;
+      }
+      case "selectAll": {
+        // All the texts of the selectable view `el` is or is in, as Ctrl+A
+        // does there: `selectionchange` then reports them.
+        const area = el && this.areaOf(el);
+        if (area) getSelection()?.selectAllChildren(area);
         break;
       }
       case "setSelection": el?._field?.setSelectionRange(args[0], args[1]); break;
@@ -9707,17 +9784,23 @@ class Player {
   }
 
   /** Where the selection starts in the copy of all of `area` (UTF-16
-   * units): what maps it back to the document the area shows. */
+   * units): what maps it back to the document the area shows. The copy up
+   * to the selection's end less the selection's own: at the start of a
+   * text, the break a copy puts before that text comes before it, as on
+   * the native platforms (a copy only up to the start would leave it
+   * out). */
   selectionStart(area) {
     const sel = getSelection();
     if (!sel?.rangeCount) return 0;
     const range = sel.getRangeAt(0);
     if (!area.contains(range.startContainer)) return 0;
-    const before = document.createRange();
-    before.setStart(area, 0);
-    before.setEnd(range.startContainer, range.startOffset);
-    if (before.collapsed) return 0;
-    return (this.selectedText(area, before) ?? "").length;
+    const upTo = document.createRange();
+    upTo.setStart(area, 0);
+    if (area.contains(range.endContainer)) upTo.setEnd(range.endContainer, range.endOffset);
+    else upTo.setEnd(area, area.childNodes.length);
+    const all = (this.selectedText(area, upTo) ?? "").length;
+    const own = (this.selectedText(area, range) ?? "").length;
+    return Math.max(0, all - own);
   }
 
   /** The box around the selection's characters in `area` (`[x, y, width,
@@ -10469,7 +10552,10 @@ class Player {
         changed: id === changedId,
         pointerType: p.pointerType,
         pressure: p.pressure, tiltX: p.tiltX, tiltY: p.tiltY,
+        eraser: !!p.eraser, barrel: !!p.barrel,
+        coalesced: id === changedId ? p.coalesced ?? [] : [],
       });
+      if (id === changedId) p.coalesced = [];
     }
     if (!points.length) return;
     // The keys held when the changed pointer went down, as its press's.
@@ -10538,6 +10624,7 @@ class Player {
       x, y, layer, startX: x, startY: y, t: performance.now(), vx: 0, vy: 0,
       pointerType: e.pointerType,
       pressure: e.pressure, tiltX: e.tiltX || 0, tiltY: e.tiltY || 0,
+      ...penButtons(e),
       touchPath: chain.filter((v) => v._events.has("onTouch")).map((v) => v._id),
       ...(isField ? { press: null } : link ? { press: link } : this.pickPress(chain)),
       // What presses report: the modifier keys at the press and its clicks.
@@ -10688,6 +10775,12 @@ class Player {
     p.pressure = e.pressure;
     p.tiltX = e.tiltX || 0;
     p.tiltY = e.tiltY || 0;
+    Object.assign(p, penButtons(e));
+    // The samples the browser merged into this move, but its own.
+    p.coalesced = (e.getCoalescedEvents?.() ?? []).slice(0, -1).map((c) => {
+      const [cx, cy] = this.point(c, p.layer);
+      return { pageX: cx, pageY: cy, pressure: c.pressure, tiltX: c.tiltX || 0, tiltY: c.tiltY || 0, time: c.timeStamp };
+    });
     this.track(p, now);
     const tx = x - p.startX;
     const ty = y - p.startY;
@@ -11049,4 +11142,11 @@ class Player {
     if (t.el._gestures?.rotation) this.call((w) => w.nsh_transform_gesture(t.el._id, 1, 2, rotation));
     this.pointers.clear();
   }
+}
+
+/** A pen's eraser end (the DOM's eraser button, `buttons & 32`) and held
+ * barrel button (`buttons & 2`) in pointer event `e`. */
+function penButtons(e) {
+  const pen = e.pointerType === "pen";
+  return { eraser: pen && (e.buttons & 32) !== 0, barrel: pen && (e.buttons & 2) !== 0 };
 }

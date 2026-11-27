@@ -204,13 +204,6 @@ pub struct Screen {
     shares: Vec<nsh_core::share::ShareSheet>,
     /// The shares to answer.
     share_answers: Vec<u32>,
-    /// The web sign-in sessions the app opened in the app, in order.
-    auth_sessions: Vec<nsh_core::auth_session::AuthSessionPage>,
-    /// The sign-in sessions to answer.
-    auth_session_answers: Vec<u32>,
-    /// The sign-in session showing: not answered, closed by the app nor
-    /// replaced yet.
-    auth_session_showing: Option<u32>,
     /// The requests on local paths that reached the platform
     /// (`pick_paths`, `open_path`, ...), in order.
     file_requests: Vec<nsh_core::file_dialog::FileRequest>,
@@ -961,13 +954,6 @@ impl Screen {
                 self.shares.push((**sheet).clone());
                 self.share_answers.push(*id);
             }
-            // Recorded, never shown: a test's machine signs in nowhere.
-            Command::AuthSession { id, page } => {
-                self.auth_sessions.push((**page).clone());
-                self.auth_session_answers.push(*id);
-                self.auth_session_showing = Some(*id);
-            }
-            Command::CloseAuthSession(id) => self.auth_session_ended(*id),
             // Recorded, never carried out: a test's machine opens, shows
             // and trashes nothing.
             Command::FileRequest { id, request } => {
@@ -2097,35 +2083,6 @@ impl Screen {
         &self.shares
     }
 
-    /// The web sign-in sessions the app opened in the app
-    /// ([`nsh_core::element::open_auth_session`]), in order: those that
-    /// reached the platform, past the request's checks (only once the
-    /// environment has [`nsh_core::platform::Environment::auth_session`];
-    /// elsewhere the page is in [`Screen::opened_urls`]).
-    pub fn auth_sessions(&self) -> &[nsh_core::auth_session::AuthSessionPage] {
-        &self.auth_sessions
-    }
-
-    /// Whether a sign-in session the app opened in the app still shows:
-    /// the user has not ended it (as
-    /// [`crate::Headless::keep_auth_sessions_open`] leaves it), and the app
-    /// has not closed it ([`nsh_core::element::close_auth_session`]).
-    pub fn auth_session_showing(&self) -> bool {
-        self.auth_session_showing.is_some()
-    }
-
-    /// Sign-in session `id` is no longer showing.
-    pub(crate) fn auth_session_ended(&mut self, id: u32) {
-        if self.auth_session_showing == Some(id) {
-            self.auth_session_showing = None;
-        }
-    }
-
-    /// The sign-in sessions to answer since the last call.
-    pub(crate) fn take_auth_session_answers(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.auth_session_answers)
-    }
-
     /// The share requests to answer since the last call.
     pub(crate) fn take_share_answers(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.share_answers)
@@ -2369,41 +2326,15 @@ impl Screen {
     }
 
     /// The texts of selectable view `area` that take part in its selection,
-    /// in document order: each text view, its text and its content box in
-    /// `area`'s points. Hidden views and texts kept out
-    /// (`selectable={false}`) are left out.
+    /// in document order, as the backends list them
+    /// (`selection::list_texts`): each text view, its text, its content box
+    /// in `area`'s points and the list marker beside it. Hidden views and
+    /// texts kept out (`selectable={false}`) are left out.
     pub(crate) fn area_texts(&self, area: NodeId) -> Vec<AreaText> {
-        let mut out = Vec::new();
-        let Some(origin) = self.bounds_in_root(area).map(|b| b.origin) else {
-            return out;
-        };
-        // The last text selection leaves out: a list marker, maybe.
-        let mut chrome = None;
-        let mut stack = vec![area];
-        while let Some(id) = stack.pop() {
-            let Some(view) = self.nodes.get(&id) else {
-                continue;
-            };
-            if view.hidden {
-                continue;
-            }
-            if let Some(text) = &view.attributed
-                && let Some(bounds) = self.bounds_in_root(id)
-            {
-                let content = view.text_content;
-                let frame = Bounds::new(bounds.origin - origin + content.origin, content.size);
-                if text.selectable == Some(false) {
-                    chrome = Some((text.text.clone(), frame));
-                } else {
-                    let marker = nsh_core::selection::marker_of(chrome.take().as_ref(), frame);
-                    out.push((id, Arc::clone(text), frame, marker));
-                }
-            }
-            if let Some(children) = self.children.get(&id) {
-                stack.extend(children.iter().rev());
-            }
-        }
-        out
+        nsh_core::selection::list_texts(&AreaViews(self), &area)
+            .into_iter()
+            .map(|t| (t.view, t.text, t.frame, t.marker))
+            .collect()
     }
 
     /// Whether the view `selector` names is selected (its accessibility
@@ -3774,6 +3705,35 @@ pub(crate) type AreaText = (
     Bounds<Points>,
     Option<String>,
 );
+
+/// The screen's views as `selection::list_texts` walks them: frames from
+/// where each view is in the root, so scroll offsets are in them already.
+struct AreaViews<'a>(&'a Screen);
+
+impl nsh_core::selection::TextTree for AreaViews<'_> {
+    type View = NodeId;
+
+    fn hidden(&self, id: &NodeId) -> bool {
+        self.0.nodes.get(id).is_none_or(|v| v.hidden)
+    }
+
+    fn text(&self, id: &NodeId) -> Option<(Arc<nsh_core::AttributedText>, Bounds<Points>)> {
+        let view = self.0.nodes.get(id)?;
+        self.0.bounds_in_root(*id)?;
+        Some((Arc::clone(view.attributed.as_ref()?), view.text_content))
+    }
+
+    fn children(&self, id: &NodeId, out: &mut Vec<(NodeId, Bounds<Points>)>) {
+        let Some(origin) = self.0.bounds_in_root(*id).map(|b| b.origin) else {
+            return;
+        };
+        for &child in self.0.children.get(id).into_iter().flatten() {
+            if let Some(b) = self.0.bounds_in_root(child) {
+                out.push((child, Bounds::new(b.origin - origin, b.size)));
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

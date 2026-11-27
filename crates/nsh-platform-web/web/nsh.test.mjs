@@ -2483,6 +2483,71 @@ test("a screen effect over an animated shader asks for one shader frame at a tim
   }
 });
 
+/**
+ * Runs `f(player, view, frames, drawn)` with a canvas view whose draws are
+ * counted, and the frames `requestAnimationFrame` was asked for.
+ */
+async function withCanvasView(f) {
+  const { player } = fakePlayer();
+  const view = { _id: 7, _kind: "canvas" };
+  const drawn = [];
+  player.view = (id) => (id === view._id ? view : null);
+  player.draw = (el) => drawn.push(el._ops);
+  const frames = [];
+  const saved = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (callback) => frames.push(callback);
+  try {
+    await f(player, view, frames, drawn);
+  } finally {
+    globalThis.requestAnimationFrame = saved;
+  }
+}
+
+const task = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test("a canvas redrawn by several batches before a frame is drawn once, at the frame", async () => {
+  await withCanvasView(async (player, view, frames, drawn) => {
+    // Each pointer move or socket message is a task with a batch of its own.
+    for (const ops of [["a"], ["b"], ["c"]]) {
+      player.op_cv(["cv", view._id, ops]);
+      await task();
+    }
+    assert.deepEqual(drawn, [], "nothing is drawn before the frame");
+    assert.equal(frames.length, 1, "one frame asked for");
+    frames.shift()(16);
+    assert.deepEqual(drawn, [["c"]], "the last drawing, once");
+    assert.equal(frames.length, 0);
+  });
+});
+
+test("a canvas an animation frame changes is drawn in that frame", async () => {
+  await withCanvasView(async (player, view, frames, drawn) => {
+    view._ops = ["path"];
+    view._slots = [0];
+    // The engine's frame steps a canvas slot (`canvas:0`) in its batch.
+    player.wasm.nsh_frame = () => {
+      player.op_a(["a", view._id, "canvas:0", "0.5"]);
+      return -1;
+    };
+    player.requestFrame();
+    assert.equal(frames.length, 1);
+    frames.shift()(16);
+    await Promise.resolve();
+    assert.deepEqual(drawn, [["path"]], "drawn before the frame's paint");
+    assert.equal(frames.length, 0, "not left for the next frame");
+  });
+});
+
+test("a picture of a canvas draws its pending drawing first", async () => {
+  await withCanvasView(async (player, view, frames, drawn) => {
+    player.op_cv(["cv", view._id, ["new"]]);
+    player.flushDraws();
+    assert.deepEqual(drawn, [["new"]]);
+    frames.shift()(16);
+    assert.deepEqual(drawn, [["new"]], "the frame has nothing left to draw");
+  });
+});
+
 test("a picture taken again reads the styles of what changed only", () => {
   const { player } = fakePlayer();
   const read = [];
@@ -3850,6 +3915,66 @@ test("a copy gives attachments' copy texts where the layout put them among the r
   // A text without copy texts copies its runs.
   el._copyTexts = null;
   assert.equal(player.selectedText(root, reaching(0, 2)), "Area is  here,\n next");
+});
+
+test("a selection's start counts the copy before it, with the break before its text", (t) => {
+  const saved = ["getComputedStyle", "document", "getSelection"].map((k) => [k, Object.getOwnPropertyDescriptor(globalThis, k)]);
+  t.after(() => {
+    for (const [k, d] of saved) d ? Object.defineProperty(globalThis, k, d) : delete globalThis[k];
+  });
+  globalThis.getComputedStyle = () => ({ visibility: "visible" });
+  const { player } = fakePlayer();
+  // Two paragraphs, one under the other, then a row of two cells on one
+  // line: the area copies as "First para.\nSecond para.\nName\tValue".
+  const box = (top) => ({ getBoundingClientRect: () => ({ top, bottom: top + 20 }) });
+  const texts = [["First para.", box(0)], ["Second para.", box(30)], ["Name", box(60)], ["Value", box(60)]];
+  const runs = texts.map(([text, parentNode], i) => {
+    const run = { _run: 0, textContent: text, parentNode };
+    run.contains = (node) => node === run;
+    return run;
+  });
+  const area = { contains: (node) => node === area || runs.includes(node), querySelectorAll: () => runs, childNodes: runs };
+  // A DOM range over the runs (each its own text node): a boundary in the
+  // area itself is before every run, or after them at its end.
+  const at = (node, offset) => (node === area ? (offset === 0 ? -1 : Infinity) : runs.indexOf(node) * 1000 + offset);
+  class Range {
+    setStart(node, offset) {
+      [this.startContainer, this.startOffset] = [node, offset];
+    }
+    setEnd(node, offset) {
+      [this.endContainer, this.endOffset] = [node, offset];
+    }
+    get collapsed() {
+      return at(this.startContainer, this.startOffset) === at(this.endContainer, this.endOffset);
+    }
+    intersectsNode(run) {
+      const from = runs.indexOf(run) * 1000;
+      return from <= at(this.endContainer, this.endOffset) && from + run.textContent.length >= at(this.startContainer, this.startOffset);
+    }
+    // `runOffset`'s: from the run's start to the boundary in it.
+    toString() {
+      return "x".repeat(this.endOffset);
+    }
+  }
+  globalThis.document = { createRange: () => new Range() };
+  let selected;
+  globalThis.getSelection = () => ({ rangeCount: 1, getRangeAt: () => selected });
+  player.selectableText = () => true;
+  player.areaOf = () => area;
+  const startAt = (run, offset) => {
+    selected = new Range();
+    selected.setStart(runs[run], offset);
+    selected.setEnd(runs[3], 5);
+    return player.selectionStart(area);
+  };
+  assert.equal(player.selectedText(area, (startAt(0, 0), selected)), "First para.\nSecond para.\nName\tValue");
+  // The first paragraph's start, and a place inside it.
+  assert.equal(startAt(0, 0), 0);
+  assert.equal(startAt(0, 6), 6);
+  // The second paragraph's start: after the first and the break.
+  assert.equal(startAt(1, 0), 12);
+  // The row's second cell: after the first cell and the tab.
+  assert.equal(startAt(3, 0), 30);
 });
 
 test("a selectable view's selection carries the box around it", (t) => {

@@ -72,6 +72,10 @@ pub struct WebProps {
     /// backend checks its navigations with
     /// [`Access::allows_webview_with`](crate::access::Access::allows_webview_with).
     pub allow_origin: Option<crate::access::WebOrigin>,
+    /// The hosts this web view may show, narrower than the app's grant
+    /// (`allowNavigation`; none: not narrowed). Checked with
+    /// [`Access::allows_webview_in`](crate::access::Access::allows_webview_in).
+    pub allow_navigation: Option<crate::access::WebHosts>,
     /// Script run after each page loads.
     pub injected_js: Option<Arc<str>>,
     /// Script run before each page's own scripts.
@@ -110,6 +114,7 @@ impl Default for WebProps {
             src: None,
             base_url: None,
             allow_origin: None,
+            allow_navigation: None,
             injected_js: None,
             injected_js_before: None,
             user_agent: None,
@@ -150,6 +155,9 @@ pub enum AudioSession {
 pub struct VideoProps {
     /// The video's URL (or `asset:/` URI).
     pub source: Option<Arc<str>>,
+    /// An image (URL or `asset:/` URI) shown while the video loads, until
+    /// its first frame is ready.
+    pub poster: Option<Arc<str>>,
     /// What its sound does to the rest of the device's audio.
     pub audio_session: AudioSession,
     /// Paused.
@@ -174,6 +182,7 @@ impl Default for VideoProps {
     fn default() -> Self {
         Self {
             source: None,
+            poster: None,
             audio_session: AudioSession::default(),
             paused: false,
             muted: false,
@@ -989,6 +998,17 @@ pub enum MountItem {
         /// The program and its uniforms.
         layer: Option<Arc<crate::shader::ShaderLayer>>,
     },
+    /// The renderer of a GPU view (`None`: none, or a name no UI set
+    /// registered: it draws nothing), sent after its `Create` and when it
+    /// changes. Its own props come as [`MountItem::ComponentProps`] and
+    /// [`MountItem::ComponentPropSlots`], as a native component's
+    /// ([`crate::gpu`]).
+    GpuView {
+        /// The view.
+        id: NodeId,
+        /// What makes its renderer.
+        source: Option<crate::gpu::GpuSource>,
+    },
     /// A shader transition starts: its `value` changed. It comes first in
     /// its batch, so the platform takes the picture of what the view (the
     /// surface, for a screen transition) shows before the batch's other
@@ -1163,6 +1183,7 @@ impl MountItem {
             | M::ScrollContent { id, .. }
             | M::Canvas { id, .. }
             | M::Shader { id, .. }
+            | M::GpuView { id, .. }
             | M::ViewProps { id, .. }
             | M::Input { id, .. }
             | M::InputValue { id, .. }

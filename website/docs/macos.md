@@ -66,6 +66,25 @@ the steps click, type and scroll with the system's input at the views their sele
 keyboard stays with the app you type in (`--foreground` lets them become the active app), and clicks reach the app's
 views as they do in the active window, under a hidden title bar too.
 
+### Signing the development host
+
+`nsh run` signs the macOS host ad hoc, as the Rust toolchain leaves it. macOS ties an app's keychain items to its
+signature, and an ad hoc signature changes with every build: after the app's Rust code is rebuilt, macOS asks for the
+keychain password before the app can read an item it saved earlier. Pass your signing identity, the one
+[`nsh package --sign`](./packaging.md#macos) takes, to sign the host with it:
+
+```sh
+security find-identity -v -p codesigning           # the identities on this Mac
+nsh run --sign "Apple Development: Jane Doe (ABCDE12345)"
+```
+
+The host is then signed under the app's id with your certificate, a signature that stays the same from one build to the
+next, so the app keeps access to its keychain items across rebuilds. A package signed with the same identity carries the
+same signature requirement. `nsh run` signs a copy of the host in the app's `.nsh/` directory, again only when the host
+was rebuilt or the identity changed. The first time `codesign` uses the identity's private key, macOS may ask whether
+to allow it; choose **Always Allow** so later rebuilds sign without asking. The host is signed without Hardened Runtime,
+so debuggers can attach to it; `nsh package --sign` adds Hardened Runtime and a secure timestamp for distribution.
+
 ### Performance monitor
 
 `--fps` (`AppOptions { fps: true, .. }` in a Rust app's `run_app`, `AppView::set_fps_monitor(true)` when embedding,
@@ -81,7 +100,7 @@ the panel however the app is opened. Add this key through `nsh.json`'s `macos.in
 | `FPS` | Frames shown over the last second: display refreshes in which the app changed (an idle app reads low; that is not slowness). `max` is what the main thread could keep up with, then the display's rate (120 Hz on ProMotion screens). |
 | `TICK` | The gaps between display refreshes as they arrived (mean, p95) and `gap`, the p95 gap between shown frames: one refresh (8.3 ms at 120 Hz) when nothing is late. |
 | `MAIN` | Main-thread time per frame (applying the engine's changes, drawing text and canvases, animations, input), its 95th percentile, and `drop`: the share of frames that took longer than one refresh. |
-| `JS` / `CORE` | Per commit: your code (handlers, timers, list rows) and NSH's core (layout, text, diffing); commits per second, native view changes per commit. |
+| `JS` / `CORE` | Per commit, over the commits of the last 5 seconds: your code (handlers, timers, list rows) and NSH's core (layout, text, diffing); commits per second, native view changes per commit. |
 | `HOP` | How long changes wait between the engine thread and the main thread; how busy the engine thread is. |
 | `CPU` / `GPU` / `MEM` | The process: CPU (100% is one core), its GPU share, its memory footprint (Activity Monitor's figure). |
 

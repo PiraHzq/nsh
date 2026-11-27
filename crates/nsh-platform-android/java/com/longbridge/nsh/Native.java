@@ -101,12 +101,11 @@ final class Native {
     static final int DOWNLOAD_END = 89;
     static final int SHARE = 90;
     static final int DETENT_CHANGE = 91;
-    static final int AUTH_SESSION = 92;
-    static final int FOCUS_IN = 93;
-    static final int FOCUS_OUT = 94;
-    static final int TEXT_DROP = 95;
-    static final int OPEN_APP_SETTINGS = 96;
-    static final int BACK_PROGRESS = 97;
+    static final int FOCUS_IN = 92;
+    static final int FOCUS_OUT = 93;
+    static final int TEXT_DROP = 94;
+    static final int OPEN_APP_SETTINGS = 95;
+    static final int BACK_PROGRESS = 96;
 
     /**
      * Draws the SVG {@code bytes} for a view {@code maxPx} pixels on its longer side, with its shorter side that long
@@ -172,9 +171,10 @@ final class Native {
 
     /**
      * Whether a web view of the running app may navigate to {@code url}, with
-     * its {@code allowOrigin} {@code origin} (null: none).
+     * its {@code allowOrigin} {@code origin} and its {@code allowNavigation}
+     * {@code hosts}, one pattern per line (null: none).
      */
-    static native boolean allowsWebview(long handle, String url, String origin);
+    static native boolean allowsWebview(long handle, String url, String origin, String hosts);
 
     /**
      * Whether the running app's web pages may capture {@code kind}
@@ -457,11 +457,15 @@ final class Native {
      * Touches for the JS responder system. phase: 0 start, 1 move, 2 end,
      * 3 cancel. Per finger: id, target node, path length (in {@code paths},
      * innermost first), pageX, pageY, locationX, locationY (dp), pressure,
-     * tiltX, tiltY (degrees) and kind (0 touch, 1 pen, 2 mouse) (8 floats
-     * in {@code coords}) and whether it changed. {@code time}: ms.
+     * tiltX, tiltY (degrees), kind (0 touch, 1 pen, 2 mouse), eraser and
+     * barrel (1 or 0: a pen's eraser end, its primary button held) (10
+     * floats in {@code coords}) and whether it changed. {@code samples}: the
+     * samples a move merged before its own, oldest first, 7 doubles each:
+     * the finger's index, pageX, pageY (dp), pressure, tiltX, tiltY and
+     * time. {@code time} and the samples' times: uptime ms.
      */
     static native void touch(long handle, int phase, int[] ids, int[] targets, int[] pathLengths, int[] paths,
-            float[] coords, boolean[] changed, long time, int activated);
+            float[] coords, double[] samples, boolean[] changed, long time, int activated);
 
     static native boolean hasPan(long handle, int id);
 

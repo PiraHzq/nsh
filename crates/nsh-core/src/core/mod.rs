@@ -15,6 +15,7 @@ mod relations;
 mod renders;
 mod resize_anchor;
 mod scrollbars;
+mod selection_ends;
 mod services;
 mod slots;
 mod sticky;
@@ -234,6 +235,9 @@ enum Kind {
     Native,
     Overlay,
     Shader,
+    /// A GPU view ([`crate::gpu`]): a view whose box its renderer draws
+    /// under its children, with a native component's own props.
+    GpuView,
 }
 
 impl Kind {
@@ -252,6 +256,7 @@ impl Kind {
                 | Kind::InputAccessory
                 | Kind::Overlay
                 | Kind::Shader
+                | Kind::GpuView
         )
     }
 
@@ -280,9 +285,14 @@ impl Kind {
             Kind::Native => ViewKind::Native,
             // A shader's view is a view the platform draws its layer in
             // (`MountItem::Shader`), under its children.
-            Kind::View | Kind::Cell | Kind::RawText | Kind::Overlay | Kind::Shader => {
-                ViewKind::View
-            }
+            // A GPU view's, the view the platform shows its frames in
+            // (`MountItem::GpuView`), under its children.
+            Kind::View
+            | Kind::Cell
+            | Kind::RawText
+            | Kind::Overlay
+            | Kind::Shader
+            | Kind::GpuView => ViewKind::View,
         }
     }
 
@@ -312,6 +322,7 @@ impl Kind {
             | Tag::ShaderTransition
             | Tag::ScreenEffect
             | Tag::ScreenTransition => Kind::Shader,
+            Tag::GpuView => Kind::GpuView,
         }
     }
 
@@ -345,6 +356,9 @@ struct ComponentState {
     /// `slots` changed since the platform was last told (a `Cell`: the
     /// commit clears it while it reads the node).
     slots_changed: std::cell::Cell<bool>,
+    /// A GPU view's renderer ([`crate::gpu`]); a native component's is
+    /// its `name`.
+    source: Option<crate::gpu::GpuSource>,
 }
 
 impl ComponentState {
@@ -1094,7 +1108,7 @@ impl Node {
                 _ => None,
             }
             .map(Box::new),
-            component: matches!(kind, Kind::Native).then(Box::default),
+            component: matches!(kind, Kind::Native | Kind::GpuView).then(Box::default),
             slot: None,
             gestures: GestureValues::default(),
             pan_enabled: true,
@@ -4323,7 +4337,7 @@ impl<M: TextEngine> Core<M> {
             // A native component draws itself where the platform
             // registered one, and is blank where it did not.
             Kind::Image => terminal_layout::LeftOut::Picture,
-            Kind::Video | Kind::WebView | Kind::Shader | Kind::Canvas => {
+            Kind::Video | Kind::WebView | Kind::Shader | Kind::GpuView | Kind::Canvas => {
                 terminal_layout::LeftOut::IfIcon
             }
             _ => terminal_layout::LeftOut::No,
@@ -4419,6 +4433,7 @@ impl<M: TextEngine> Core<M> {
                     | Kind::Video
                     | Kind::WebView
                     | Kind::Shader
+                    | Kind::GpuView
             ),
             input: kind == Kind::Input,
             glyphs,
@@ -5485,6 +5500,15 @@ impl<M: TextEngine> Core<M> {
             Prop::Native(NativeProp::AllowOrigin(Some(origin))) => {
                 Prop::Native(NativeProp::AllowOrigin(self.check_allow_origin(&origin)))
             }
+            Prop::Native(NativeProp::AllowNavigation(Some(hosts))) => {
+                match crate::access::WebHosts::parse(&hosts) {
+                    Ok(_) => Prop::Native(NativeProp::AllowNavigation(Some(hosts))),
+                    Err(e) => {
+                        self.deny(format!("`allowNavigation`: {e}"));
+                        Prop::Native(NativeProp::AllowNavigation(None))
+                    }
+                }
+            }
             prop => prop,
         };
         if self.access.is_unrestricted() {
@@ -5550,6 +5574,15 @@ impl<M: TextEngine> Core<M> {
                     None => {
                         refuse_media(self, "the video", &url);
                         Prop::Native(NativeProp::Src(None))
+                    }
+                }
+            }
+            Prop::Native(NativeProp::Poster(Some(url))) if kind == Kind::Video => {
+                match self.media_source(&url) {
+                    Some(granted) => Prop::Native(NativeProp::Poster(Some(granted.unwrap_or(url)))),
+                    None => {
+                        refuse_media(self, "the poster", &url);
+                        Prop::Native(NativeProp::Poster(None))
                     }
                 }
             }
@@ -6053,6 +6086,23 @@ impl<M: TextEngine> Core<M> {
         let prop = match prop {
             Prop::Component(name) if self.nodes[key as usize].kind == Kind::View => {
                 self.create_instance(id, name);
+                return Ok(());
+            }
+            // A GPU view names a renderer a UI set registered.
+            Prop::Component(name) if self.nodes[key as usize].kind == Kind::GpuView => {
+                let source = self.components.gpu_renderer(&name);
+                if source.is_none() {
+                    log::warn!(target: "js", "no GPU renderer is registered as `{name}`; the view draws nothing");
+                }
+                self.set_gpu_source(key, id, source);
+                return Ok(());
+            }
+            Prop::GpuRenderer(source) => {
+                if self.nodes[key as usize].kind == Kind::GpuView {
+                    self.set_gpu_source(key, id, source);
+                } else {
+                    log::warn!("a GPU renderer on node {id}, which is no GPU view");
+                }
                 return Ok(());
             }
             Prop::ComponentSlot(name) => {
@@ -8328,6 +8378,14 @@ impl<M: TextEngine> Core<M> {
                     name: name.clone(),
                 });
             }
+            // A GPU view's renderer, before its props (set later, it is
+            // sent then).
+            if let Some(source) = &component.source {
+                self.mount.push(MountItem::GpuView {
+                    id,
+                    source: Some(source.clone()),
+                });
+            }
         }
         if let Some(item) = self.creation_tracking(key) {
             self.mount.push(item);
@@ -8500,6 +8558,32 @@ impl<M: TextEngine> Core<M> {
     }
 
     #[inline]
+    /// Sets GPU view `key`'s renderer: sent with its `Create`, or now when
+    /// it is made already, with every prop again (a new renderer starts
+    /// from none).
+    fn set_gpu_source(&mut self, key: Key, id: NodeId, source: Option<crate::gpu::GpuSource>) {
+        let node = &mut self.nodes[key as usize];
+        let created = node.created;
+        let Some(component) = node.component.as_mut() else {
+            return;
+        };
+        if component.source == source {
+            return;
+        }
+        component.source = source.clone();
+        if !created {
+            return;
+        }
+        self.mount.push(MountItem::GpuView { id, source });
+        component.changed = component.props.iter().map(|(k, _)| k.clone()).collect();
+        let mut flags = dirty::COMPONENT;
+        if !component.slots.is_empty() {
+            component.slots_changed.set(true);
+            flags |= dirty::ANIMATION;
+        }
+        self.mark(key, flags);
+    }
+
     fn mark(&mut self, key: Key, flags: u32) {
         let node = &mut self.nodes[key as usize];
         node.dirty |= flags;
@@ -8749,6 +8833,7 @@ impl<M: TextEngine> Core<M> {
                 });
             }
             if flags & dirty::COMPONENT != 0
+                && self.nodes[key as usize].kind == Kind::Native
                 && let Some(component) = self.nodes[key as usize].component.as_ref()
                 && component.name.is_none()
             {
@@ -11295,6 +11380,12 @@ impl<M: TextEngine> Core<M> {
         // window follows a jump in this same commit. In its parent's
         // viewport, the view around it scrolls instead.
         let mut outer_to = None;
+        // The `ScrollTo`s sent with this layout, recorded after its
+        // anchoring `ScrollBy` (below): the platform applies that one
+        // first, a mount item before the commands. Counted the other way,
+        // a report between the two would replay the `ScrollBy` over the
+        // `ScrollTo` and leave the list believed away from where it is.
+        let mut scrolls_to = Vec::new();
         for (target, command) in &mut self.commands {
             if *target != id {
                 continue;
@@ -11341,7 +11432,7 @@ impl<M: TextEngine> Core<M> {
                 outer_to = Some((o.start + offset, animated));
                 continue;
             }
-            list.issue_scroll_to(offset);
+            scrolls_to.push(offset);
             let (x, y) = if horizontal {
                 (Points(offset), Points::ZERO)
             } else {
@@ -11364,11 +11455,7 @@ impl<M: TextEngine> Core<M> {
         if let (Some(offset), Some(o)) = (retarget, &outer) {
             outer_to = Some((o.start + offset, true));
         } else if let Some(offset) = retarget {
-            self.nodes[key as usize]
-                .list
-                .as_mut()
-                .expect("list")
-                .issue_scroll_to(offset);
+            scrolls_to.push(offset);
             let (x, y) = if horizontal {
                 (Points(offset), Points::ZERO)
             } else {
@@ -11674,12 +11761,12 @@ impl<M: TextEngine> Core<M> {
             .as_ref()
             .and_then(|s| s.content)
             .map_or(0.0, |c| if horizontal { c.width.0 } else { c.height.0 });
+        let list = self.nodes[key as usize].list.as_mut().expect("list");
         if anchor != 0.0 {
-            self.nodes[key as usize]
-                .list
-                .as_mut()
-                .expect("list")
-                .issue_scroll_by(anchor);
+            list.issue_scroll_by(anchor);
+        }
+        for offset in scrolls_to {
+            list.issue_scroll_to(offset);
         }
         let scroll_by = (anchor != 0.0).then(|| {
             let (dx, dy) = if horizontal {
@@ -12772,6 +12859,9 @@ fn apply_native(control: &mut NativeProps, prop: NativeProp) {
         (NativeProps::WebView(p), P::AllowOrigin(v)) => {
             p.allow_origin = v.and_then(|o| crate::access::WebOrigin::parse(&o).ok());
         }
+        (NativeProps::WebView(p), P::AllowNavigation(v)) => {
+            p.allow_navigation = v.and_then(|h| crate::access::WebHosts::parse(&h).ok());
+        }
         (NativeProps::WebView(p), P::InjectedJavaScript(v)) => p.injected_js = v,
         (NativeProps::WebView(p), P::InjectedJavaScriptBefore(v)) => p.injected_js_before = v,
         (NativeProps::WebView(p), P::UserAgent(v)) => p.user_agent = v,
@@ -12789,6 +12879,7 @@ fn apply_native(control: &mut NativeProps, prop: NativeProp) {
             }
         }
         (NativeProps::Video(p), P::Src(v)) => p.source = v,
+        (NativeProps::Video(p), P::Poster(v)) => p.poster = v,
         (NativeProps::Video(p), P::Paused(v)) => p.paused = v,
         (NativeProps::Video(p), P::Muted(v)) => p.muted = v,
         (NativeProps::Video(p), P::Volume(v)) => p.volume = v.clamp(0.0, 1.0),

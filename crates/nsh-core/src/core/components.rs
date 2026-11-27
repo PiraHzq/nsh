@@ -509,6 +509,68 @@ pub(super) enum NewChild {
     Kept(SharedString),
 }
 
+/// The keyed old elements of a parent by key ([`Core::match_children`]),
+/// indexed the first time one is looked up: a few elements are searched in
+/// order, many once, so a long keyed list moved or reversed is matched in
+/// linear time. Old elements are only ever taken (`None`) while matching,
+/// so the index stays valid.
+#[derive(Default)]
+pub(super) struct OldKeys {
+    /// The first old element of each key.
+    first: FxHashMap<SharedString, usize>,
+    /// The next old element of the same key after each one (`usize::MAX`
+    /// for none).
+    next: Vec<usize>,
+    indexed: bool,
+}
+
+impl OldKeys {
+    /// Up to this many old elements are searched rather than indexed.
+    const SEARCHED: usize = 16;
+
+    /// The first old element of key `key` left in `old` that is `ok`.
+    fn find(
+        &mut self,
+        old: &[Option<Expanded>],
+        key: &SharedString,
+        ok: impl Fn(&Expanded) -> bool,
+    ) -> Option<usize> {
+        let is = |o: &Option<Expanded>| {
+            o.as_ref()
+                .is_some_and(|o| o.key.as_ref() == Some(key) && ok(o))
+        };
+        if old.len() <= Self::SEARCHED {
+            return old.iter().position(is);
+        }
+        if !self.indexed {
+            self.indexed = true;
+            self.next = vec![usize::MAX; old.len()];
+            // From the end, so each key's first is the earliest.
+            for (at, o) in old.iter().enumerate().rev() {
+                if let Some(k) = o.as_ref().and_then(|o| o.key.as_ref())
+                    && let Some(next) = self.first.insert(k.clone(), at)
+                {
+                    self.next[at] = next;
+                }
+            }
+        }
+        // Those taken go from the front (duplicate keys taken in order are
+        // not walked again).
+        let first = self.first.get_mut(key)?;
+        while *first != usize::MAX && old[*first].is_none() {
+            *first = self.next[*first];
+        }
+        let mut at = *first;
+        while at != usize::MAX {
+            if is(&old[at]) {
+                return Some(at);
+            }
+            at = self.next[at];
+        }
+        None
+    }
+}
+
 /// Whether a slot's place only places it: no styles, props, listeners or
 /// children of its own (what fills it then needs no node around it).
 fn is_plain(el: &ElNode) -> bool {
@@ -640,23 +702,6 @@ struct UrlScheme {
     /// what the app set (`UrlScheme.setUrl`, `set_app_url`). The one copy,
     /// which every VM's `System` shares ([`Core::app_url_cell`]).
     address: crate::url_scheme::AppUrlCell,
-}
-
-/// The answer of a web sign-in session ([`crate::auth_session`]).
-type AuthSessionAnswer = AnswerSlot<
-    Result<crate::auth_session::AuthSessionOutcome, crate::auth_session::AuthSessionError>,
->;
-
-/// The web sign-in session waiting for its end ([`crate::auth_session`]).
-struct AuthSession {
-    /// The request, as the platform's answers name it.
-    id: u32,
-    /// The callback scheme (lower case): a link of it ends the session.
-    scheme: String,
-    answer: AuthSessionAnswer,
-    /// The URL request that opens the page in the system browser, where
-    /// the platform shows no session: the browser not opening fails it.
-    opening: Option<u32>,
 }
 
 /// Files the system opened the app with ([`crate::file_type`]).
@@ -849,8 +894,6 @@ pub(super) struct Components {
     /// ([`crate::EventKind::Share`]), by request.
     shares:
         FxHashMap<u32, AnswerSlot<Result<crate::share::ShareOutcome, crate::share::ShareError>>>,
-    /// The web sign-in session waiting for its callback, if any.
-    auth_session: Option<AuthSession>,
     /// Requests on local paths (`pick_paths`, `open_path`, ...), by
     /// request id: their answers.
     file_requests: FxHashMap<u32, FileAnswer>,
@@ -1002,7 +1045,6 @@ impl Default for Components {
             screen_colors: FxHashMap::default(),
             next_screen_color: 1,
             shares: FxHashMap::default(),
-            auth_session: None,
             file_requests: FxHashMap::default(),
             next_file_request: 1,
             next_clipboard_read: 1,
@@ -1139,6 +1181,13 @@ fn same(a: &Option<std::rc::Rc<ClassList>>, b: &Option<std::rc::Rc<ClassList>>) 
         (Some(a), Some(b)) => std::rc::Rc::ptr_eq(a, b),
         (None, None) => true,
         _ => false,
+    }
+}
+
+impl Components {
+    /// The GPU renderer the sets registered as `name`.
+    pub(super) fn gpu_renderer(&self, name: &str) -> Option<crate::gpu::GpuSource> {
+        self.registry.registered_gpu_renderer(name).cloned()
     }
 }
 
@@ -3999,6 +4048,9 @@ impl<M: TextEngine> Core<M> {
         // follow each other as they did, and are then found without a
         // search of all the old ones for each.
         let mut after_kept = 0;
+        // The keyed old elements by key, for the rows and elements not
+        // where they were (a reversed list: each would search them all).
+        let mut keys = OldKeys::default();
         for child in new {
             let (owner, el) = match child {
                 NewChild::Made(owner, el) => (owner, el),
@@ -4011,7 +4063,7 @@ impl<M: TextEngine> Core<M> {
                     let at = if old.get(after_kept).is_some_and(is) {
                         Some(after_kept)
                     } else {
-                        old.iter().position(is)
+                        keys.find(&old, &key, |_| true)
                     };
                     match at.and_then(|at| {
                         after_kept = at + 1;
@@ -4033,6 +4085,7 @@ impl<M: TextEngine> Core<M> {
                     &mut out,
                     &mut placeholder,
                     &mut cursor,
+                    &mut keys,
                 );
             };
             match owner {
@@ -4076,6 +4129,7 @@ impl<M: TextEngine> Core<M> {
         out: &mut Vec<Expanded>,
         placeholder: &mut Option<usize>,
         cursor: &mut usize,
+        keys: &mut OldKeys,
     ) {
         // A slot a view fills: placed as it is (`Filled`), or in a node of
         // this view's own when the view gives it anything, which lays its
@@ -4239,10 +4293,7 @@ impl<M: TextEngine> Core<M> {
                 let component = matches!(part, Part::Component(_));
                 let matches = |o: &Expanded| !component && o.tag == el.tag && o.part == part;
                 let at = match &el.key {
-                    Some(k) => old.iter().position(|o| {
-                        o.as_ref()
-                            .is_some_and(|o| o.key.as_ref() == Some(k) && matches(o))
-                    }),
+                    Some(k) => keys.find(old, k, matches),
                     None => {
                         let at = old[(*cursor).min(old.len())..]
                             .iter()
@@ -6345,23 +6396,6 @@ impl<M: TextEngine> Core<M> {
             log::warn!("link dropped: {dropped}");
             return;
         }
-        // The callback of the waiting sign-in session ends it: it is the
-        // session's answer, never a link the app navigates by (nor its
-        // address, which would keep the credentials it carries).
-        if !page
-            && change.is_none()
-            && self
-                .components
-                .auth_session
-                .as_ref()
-                .is_some_and(|s| crate::auth_session::is_callback(&url, &s.scheme))
-        {
-            self.end_auth_session(
-                None,
-                Ok(crate::auth_session::AuthSessionOutcome::Completed(url)),
-            );
-            return;
-        }
         self.components.url_schemes.address.set(url.clone());
         if quiet {
             return;
@@ -6962,8 +6996,6 @@ impl<M: TextEngine> Core<M> {
                 let available = self.components.environment.share && self.access.allows_share();
                 answer.borrow_mut().deliver(available);
             }
-            Action::AuthSession(request, answer) => self.start_auth_session(request, answer),
-            Action::CloseAuthSession => self.close_auth_session(),
             Action::RenderCanvas(request, answer) => self.start_canvas_render(*request, answer),
             Action::FileRequest(request, answer) => {
                 use crate::file_dialog::FileRequest;
@@ -7051,136 +7083,6 @@ impl<M: TextEngine> Core<M> {
                 sheet: Box::new(crate::share::ShareSheet::new(request, anchor)),
             },
         });
-    }
-
-    /// Checks `request` and starts its sign-in session
-    /// ([`crate::auth_session`]): sent to the platform where it shows
-    /// sessions, opened in the system browser elsewhere; `answer` gets how
-    /// it ended. Request ids are unique in the process, as shares' are.
-    fn start_auth_session(
-        &mut self,
-        request: crate::auth_session::AuthSessionRequest,
-        answer: AuthSessionAnswer,
-    ) {
-        use crate::auth_session::{AuthSessionError, AuthSessionOutcome, AuthSessionPage};
-        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
-        let in_app = self.components.environment.auth_session;
-        let scheme = request.scheme();
-        let refused = if let Err(wrong) = request.check() {
-            Some(AuthSessionError::failed(wrong))
-        } else if !self.access.allows_open_url(&request.url) {
-            let denied = crate::open_url::not_granted(&request.url);
-            self.deny(denied.message().to_owned());
-            Some(AuthSessionError {
-                code: Some(crate::element::codes::ACCESS_DENIED.into()),
-                message: denied.message().to_owned(),
-            })
-        } else if !in_app && !self.components.environment.scheme_links {
-            // This platform hands the app no links of its schemes (the web,
-            // the GPUI and terminal backends): the callback could never come
-            // back.
-            Some(AuthSessionError::unavailable(format!(
-                "openAuthSession: no in-app sign-in here, and no link of `{scheme}:` can reach the app on this platform"
-            )))
-        } else if !in_app
-            && !self
-                .components
-                .url_schemes
-                .links
-                .schemes()
-                .contains(&scheme)
-        {
-            // Only a link of a scheme the app claims brings the callback
-            // back to it here; without one the session could never end.
-            Some(AuthSessionError::unavailable(format!(
-                "openAuthSession: no in-app sign-in here, and `{scheme}:` is not a scheme the app claims (nsh.json `schemes`)"
-            )))
-        } else {
-            None
-        };
-        if let Some(error) = refused {
-            answer.borrow_mut().deliver(Err(error));
-            return;
-        }
-        // One session at a time: the one still waiting ends as cancelled
-        // (the platform closes it where it can), so a session whose
-        // callback never came cannot hold every later one back.
-        if let Some(earlier) = self.components.auth_session.take() {
-            earlier
-                .answer
-                .borrow_mut()
-                .deliver(Ok(AuthSessionOutcome::Cancelled));
-        }
-        let id = loop {
-            let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if id != 0 {
-                break id;
-            }
-        };
-        let page = AuthSessionPage::new(&request);
-        let opening = if in_app {
-            let _ = self.apply_op(Op::Command {
-                id: crate::ROOT_ID,
-                command: Command::AuthSession {
-                    id,
-                    page: Box::new(page),
-                },
-            });
-            None
-        } else {
-            // As `open_url`: the engine asks the embedding app, then the
-            // platform; whether it opened comes back to `answer_open_url`.
-            let open = self.components.next_url_open;
-            self.components.next_url_open = open.wrapping_add(1);
-            let (_, opened) = crate::element::Answer::<bool>::new();
-            self.components.url_opens.insert(open, opened);
-            self.components.url_requests.push((open, page.url));
-            Some(open)
-        };
-        self.components.auth_session = Some(AuthSession {
-            id,
-            scheme,
-            answer,
-            opening,
-        });
-    }
-
-    /// Closes the app's waiting sign-in session, if any: answers it as
-    /// cancelled and, where the platform shows it, has the platform close
-    /// it. A page in the system browser stays open: nothing closes it.
-    fn close_auth_session(&mut self) {
-        let Some(session) = self.components.auth_session.take() else {
-            return;
-        };
-        session
-            .answer
-            .borrow_mut()
-            .deliver(Ok(crate::auth_session::AuthSessionOutcome::Cancelled));
-        if session.opening.is_none() {
-            let _ = self.apply_op(Op::Command {
-                id: crate::ROOT_ID,
-                command: Command::CloseAuthSession(session.id),
-            });
-        }
-    }
-
-    /// Ends the waiting sign-in session `id` (any, `None`) with `result`.
-    fn end_auth_session(
-        &mut self,
-        id: Option<u32>,
-        result: Result<
-            crate::auth_session::AuthSessionOutcome,
-            crate::auth_session::AuthSessionError,
-        >,
-    ) {
-        let session = &mut self.components.auth_session;
-        if session
-            .as_ref()
-            .is_some_and(|s| id.is_none_or(|id| s.id == id))
-            && let Some(session) = session.take()
-        {
-            session.answer.borrow_mut().deliver(result);
-        }
     }
 
     /// Applies what the downloads ask of the core
@@ -7412,18 +7314,6 @@ impl<M: TextEngine> Core<M> {
     pub fn answer_open_url(&mut self, id: u32, opened: bool) {
         if let Some(answer) = self.components.url_opens.remove(&id) {
             answer.borrow_mut().deliver(opened);
-        }
-        if !opened
-            && let Some(session) = &self.components.auth_session
-            && session.opening == Some(id)
-        {
-            let session = session.id;
-            self.end_auth_session(
-                Some(session),
-                Err(crate::auth_session::AuthSessionError::failed(
-                    "openAuthSession: the browser did not open the sign-in page",
-                )),
-            );
         }
     }
 
@@ -8076,14 +7966,6 @@ impl<M: TextEngine> Core<M> {
                 if let Some(answer) = self.components.shares.remove(&request) {
                     answer.borrow_mut().deliver(result);
                 }
-                true
-            }
-            EventKind::AuthSession if id == crate::ROOT_ID => {
-                let Some((request, result)) = crate::auth_session::answer_from_payload(payload)
-                else {
-                    return false;
-                };
-                self.end_auth_session(Some(request), result);
                 true
             }
             EventKind::CanvasImage if id == crate::ROOT_ID => self.answer_canvas_render(payload),

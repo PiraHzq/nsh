@@ -244,7 +244,9 @@ Rust toolchain or a linker; how is in the module docs of `crates/nsh-cli/src/web
 through wasm-bindgen (`crates/nsh-cli/src/bindgen.rs`) is split the same way, before wasm-bindgen runs
 (`web::link`): wasm-bindgen rewrites the module it reads, and its output could not be split, so it runs on the main
 module alone. What wasm-bindgen reads or rewrites stays in the main module, and the CLI checks that its output still
-has what the side modules import from it. A Rust app's such runtime leaves out the gates the app never needs
+has what the side modules import from it. A Rust app's runtime, with wasm-bindgen or without, splits off the gates
+of the `nsh/base` parts and of shaders (`web::rust_on_demand`), which the page loads the first time the app makes a
+component of the part by name or shows a shader, not before it starts. It leaves out the gates the app never needs
 before it is split (`prune::unused_gates`), rather than publishing side modules no page loads: when no code
 reachable from its other exports makes a component by name (`ComponentElement::by_name`, found by the symbol
 `nsh_core::element::__private::BY_NAME_MARKER` names: the stand-in `make` of such an element, kept by a test in
@@ -385,8 +387,9 @@ root (`set_root`); `app_root()` is generated from `"root"`, `"theme"` (compiled 
 (`nsh_base::registry_of([parts::core])`, `RustApp::rust_web_sets`), not `nsh_base::registry()`: with no JS, nothing
 makes a component by its registered name, the root makes each component by type (`nsh_base::select()`), which links
 that component where it is used, and the set gives the theme's tokens and the built-in scroll bars. Registering every
-part would link every component of `nsh/base` into the module. The page calls `player.runRust()` (`nsh_start_rust`)
-instead of `runModule`:
+part would link every component of `nsh/base` into the module, and for the same reason the runtime (feature
+`rust-parts`) has no `nsh/base` default of its own: it serves the sets `rust_app!` gave, plus the parts whose gates a
+component made by name ran. The page calls `player.runRust()` (`nsh_start_rust`) instead of `runModule`:
 the packaged page when `app.rust` is set (no `app.js`), the dev page (`{{rust}}`) once the dev server greets it; the
 dev session publishes no bundles (`DevSession::rust_root`). The browser host's exports (`nsh_browser_*`) are
 `cfg(feature = "browser-core")`. The runtime builds to
@@ -395,8 +398,8 @@ dev session publishes no bundles (`DevSession::rust_root`). The browser host's e
 Rust code meant for the web too uses the engine's services rather than threads and the standard clock: `fetch`
 (`nsh_core::element::fetch`, below), the executor's timers, `nsh_core::time`. `examples/gallery-rs` does. As a
 Rust app (2026-11) its `nsh.wasm` is 9.15 MB (3.11 MB with `gzip -9`, 2.18 MB with brotli; 12.78 / 4.40 / 3.00 MB
-while it registered every part of `nsh/base`; `examples/tasks-rs` 5.23 MB, 11.04 MB before): no browser host, which
-a TSX entry needs.
+while it registered every part of `nsh/base`; `examples/tasks-rs` 4.26 MB, 5.36 MB while the runtime kept a default
+`nsh/base` set, 11.04 MB before that): no browser host, which a TSX entry needs.
 
 ### Crates that call JS through wasm-bindgen
 
@@ -645,7 +648,8 @@ chunk's fonts before importing it.
 
 Text (`src/text.rs`) is broken into lines here, with widths and font metrics from the browser (canvas `measureText`
 through imports, cached), and runs are drawn at the positions computed here so the baseline lands where layout put
-it. Text with numeric variants (`tabular-nums`, ...) and color emoji are measured against what the DOM draws, since
+it. Canvas measures at the font size times the pixel ratio and scales back (`measureWidth` in `nsh.js`), as a hinted
+font's advances depend on the ratio; the caches are cleared when the ratio changes. Text with numeric variants (`tabular-nums`, ...) and color emoji are measured against what the DOM draws, since
 canvas measures them differently. The CSS of runs (`src/text/css.rs`) and line breaking (`src/text/wrap.rs`, with
 CJK punctuation's line start and end rules) depend on nothing of the browser and are tested on the host
 (`tests/text`); `web/text-browser.test.mjs` checks measurements against what Chrome draws. The last line a line
@@ -994,7 +998,8 @@ browsers' touches into what phones report:
   leaves them out, as `SelectionModel::text` does. The area's `onSelectionChange` (`areaSelectionChanged`, on the
   document's `selectionchange`) carries that text, where it starts and `bounds`, the box around the selected
   characters in the area as of the event (`selectionBounds`: the client rects of the selected parts of the runs a
-  copy takes, united, in the area's own points), to which the core adds `pageBounds`. It is reported when the text or
+  copy takes, united, in the area's own points), to which the core adds `pageBounds`. It carries no ends yet, so
+  `anchor` and `focus` (the list items the selection starts and ends in, `text.md`) stay out on the web. It is reported when the text or
   the box changed (the same text selected elsewhere); the layout moving the selected text after a batch is not
   looked for, which would read the page's layout after every batch.
 - **Elsewhere**: no page context menu or iOS callout outside fields and selectable text; a mouse drag selects only in

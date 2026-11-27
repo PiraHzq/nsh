@@ -321,6 +321,9 @@ struct Selected {
     bounds: Option<Bounds<Points>>,
     /// Only for change detection; the core computes the callback's page bounds.
     origin: Point<Points>,
+    /// The anchor's and the focus's text nodes and offsets
+    /// (`SelectionModel::ends`), which the core places in list items.
+    ends: Option<[(u64, u32); 2]>,
 }
 
 #[derive(Default)]
@@ -879,6 +882,17 @@ impl AreaResponder {
         self.clear_selection();
     }
 
+    /// Selects every text (`ref.selectAll()`), as the edit menu's Select
+    /// All does after a long press: with the handles and the edit menu.
+    pub(crate) fn select_everything(&self) {
+        self.hide_menu();
+        self.ivars().touch.set(true);
+        // Taking the first responder ends any other area's selection.
+        self.becomeFirstResponder();
+        // SAFETY: this class's own `selectAll:`, which takes any sender.
+        let _: () = unsafe { msg_send![self, selectAll: std::ptr::null::<AnyObject>()] };
+    }
+
     /// A mount batch was applied: while something is selected, the
     /// texts, highlight and handles follow what changed.
     pub(crate) fn batch_applied(&self) {
@@ -1242,6 +1256,7 @@ impl AreaResponder {
                     text: model.text(&*texts),
                     start: model.start_offset(&*texts),
                     bounds: model.selected_bounds(&*texts),
+                    ends: model.ends(&*texts),
                     origin: texts.area.as_ref().map_or(Point::default(), |area| {
                         pt(area.convertPoint_toView(CGPoint::ZERO, None))
                     }),
@@ -1258,6 +1273,9 @@ impl AreaResponder {
         ];
         if let Some(bounds) = selected.bounds {
             fields.push(("bounds", PayloadValue::Bounds(bounds)));
+        }
+        if let Some(ends) = selected.ends {
+            fields.extend(nsh_core::selection::end_fields(ends));
         }
         // Not borrowed while the handler runs: it may detach the area.
         let control = self.ivars().control.borrow().clone();

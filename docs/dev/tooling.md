@@ -127,7 +127,10 @@ to that file. `C-h e` opens its log/error panel; closing it gives every row back
 - Without `--port`, `nsh run` and `nsh dev` take the port their app (its entry) had last, else the first free one from
   8790; `nsh dev --server-only` takes 8790, which embedding apps keep in their code. By default `nsh run` and `nsh dev`
   bind to loopback, and `--target ios`, `android` or `web` and `nsh dev --server-only` bind to every address for other
-  machines (`dev::Listen`, `run::Target::uses_network`). `nsh dev --host <IPV4>` overrides the bind address (for example
+  machines (`dev::Listen`, `run::Target::uses_network`, decided in `main.rs`'s `dev_listen`). A port is free when the
+  server could listen on it at that address: a loopback server's port is probed on loopback, since listening on every
+  address, even for a probe, makes Windows Defender Firewall ask to let each new `nsh` executable on the network
+  (`dev_port::port_is_free`). `nsh dev --host <IPV4>` overrides the bind address (for example
   `nsh dev --server-only --host 127.0.0.1` for loopback only); with `--target android`, only `127.0.0.1` and `0.0.0.0`
   are accepted because `adb reverse` forwards the device's `127.0.0.1` to host `127.0.0.1`, and `run_android` passes
   `DevSession::loopback_url()`.
@@ -1201,6 +1204,9 @@ macOS SDKs are 26 or newer. Building against the newer SDK enables iOS 26's syst
 Liquid Glass; the deployment target stays iOS 15.0. After building, `.github/ci/ios-build-versions.py` checks
 the four device, simulator and Catalyst runtimes' actual `LC_BUILD_VERSION` before packaging: the SDK must
 be 26 or newer and the minimum OS must remain 15.0. It reads the binaries without modifying them.
+The Intel job (`macos-15-intel`, Xcode 16.4: Xcode 26 does not run on Intel Macs) builds only the simulator
+and Catalyst runtimes for x86_64 (`x86_64-apple-ios`, `x86_64-apple-ios-macabi`) and checks they have the iOS 18
+SDK or newer; it has no device runner and no embedding SDK.
 
 `.github/workflows/release.yml` runs `cargo xtask dist` on macOS (Apple silicon, with the iOS and Mac Catalyst
 runtimes and the iOS SDK, and Intel), Linux and Windows (x86_64 and arm64), each with the desktop runtime and the GPUI
@@ -1210,7 +1216,7 @@ and terminal development hosts of its machine. The components the same on every 
 directory `nsh/` in `nsh-<platform>.tar.gz` (`.zip` on Windows) with the CLI and that machine's runtime only. The
 embedding SDKs are archives of their own (`nsh-embed-ios.zip`, `nsh-embed-android.zip`), and `nsh component pack`
 moves every other runtime into its component's archive (`nsh-android.tar.gz`, `nsh-android-symbols.tar.gz` and
-`nsh-web.tar.gz` from x86_64 Linux's build, `nsh-ios-macos-arm64.tar.gz`, `nsh-gpui-<platform>.tar.gz`,
+`nsh-web.tar.gz` from x86_64 Linux's build, `nsh-ios-macos-arm64.tar.gz`, `nsh-ios-macos-x86_64.tar.gz`, `nsh-gpui-<platform>.tar.gz`,
 `nsh-tui-<platform>.tar.gz`), each with a `.sha256`.
 The release builds them with thin LTO over 16 codegen units (`CARGO_PROFILE_RELEASE_*` in the workflow) rather than
 the profile's fat LTO over one, which linked each executable single-threaded for up to 25 minutes; `web` keeps fat LTO.

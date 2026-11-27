@@ -2889,6 +2889,115 @@ fn native_components_get_their_name_props_and_size() {
     );
 }
 
+/// A GPU view named from JS gets its registered renderer's source with its
+/// creation, and its props as a native component's.
+#[test]
+fn a_gpu_view_gets_its_registered_renderer_and_props() {
+    let mut c = core();
+    let source = crate::gpu::GpuSource::new(1_u8);
+    let mut registry = crate::element::Registry::new();
+    registry.gpu_renderer_source("test/scene", source.clone());
+    c.set_components(registry);
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::GpuView,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Component("test/scene".into()),
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::ComponentProp("exposure".into(), Some(serde_json::json!(1.5))),
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    let at = |pred: &dyn Fn(&MountItem) -> bool| batch.items.iter().position(pred);
+    let create = at(&|i| {
+        matches!(
+            i,
+            MountItem::Create {
+                id: 2,
+                kind: ViewKind::View
+            }
+        )
+    })
+    .unwrap();
+    let gpu = at(&|i| matches!(i, MountItem::GpuView { id: 2, source: Some(s) } if *s == source))
+        .expect("the renderer reaches the platform");
+    let props = at(&|i| matches!(i, MountItem::ComponentProps { id: 2, .. })).unwrap();
+    assert!(create < gpu && gpu < props);
+    // Not a native component: no component name is sent.
+    assert!(at(&|i| matches!(i, MountItem::Component { .. })).is_none());
+
+    // Another renderer: the view's props are sent again, for it.
+    let other = crate::gpu::GpuSource::new(2_u8);
+    apply(
+        &mut c,
+        vec![Op::SetProp {
+            id: 2,
+            prop: Prop::GpuRenderer(Some(other.clone())),
+        }],
+    );
+    let batch = c.commit().unwrap();
+    let gpu = batch
+        .items
+        .iter()
+        .position(|i| matches!(i, MountItem::GpuView { id: 2, source: Some(s) } if *s == other))
+        .expect("the new renderer");
+    let props = batch
+        .items
+        .iter()
+        .position(|i| {
+            matches!(i, MountItem::ComponentProps { id: 2, props }
+                if props.iter().any(|(k, _)| &**k == "exposure"))
+        })
+        .expect("its props again");
+    assert!(gpu < props);
+}
+
+/// A GPU view naming no registered renderer is a plain view: nothing tells
+/// the platform of a renderer.
+#[test]
+fn a_gpu_view_of_an_unknown_renderer_draws_nothing() {
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::GpuView,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Component("test/missing".into()),
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    assert!(!batch.items.iter().any(|i| matches!(
+        i,
+        MountItem::GpuView {
+            source: Some(_),
+            ..
+        }
+    )));
+}
+
 #[test]
 fn a_native_component_gets_its_accent_color_as_a_prop() {
     // `accentColor` (or `accent-*`) on a native component reaches it as its
@@ -4089,6 +4198,71 @@ impl ScrollingPlatform {
         }
         panic!("the list never settled");
     }
+}
+
+/// A `scrollToIndex` clamped to the list's start, in the commit where rows
+/// above the viewport changed size: the platform applies the anchoring
+/// `ScrollBy` (a mount item) before the `ScrollTo` (a command after them)
+/// and may report in between. The core counts its scrolls in that order,
+/// so the report does not make it think the list is still away from the
+/// start, and it sends no `ScrollBy` that would push the view past it
+/// (#3235).
+#[test]
+fn a_report_between_the_anchoring_scroll_and_a_clamped_scroll_to_index_keeps_the_start() {
+    let mut c = core();
+    thousand_rows(&mut c);
+    let (mut next_id, mut cells) = (100, Vec::new());
+    let mut platform = ScrollingPlatform::default();
+    let short = |_: u32| 50.0;
+    platform.settle(&mut c, &mut next_id, &mut cells, &short);
+    // Far down, then back up over rows not measured yet.
+    platform.y = 2000.0;
+    c.set_scroll_offset(2, point(px(0.0), px(platform.y)), platform.applied);
+    platform.settle(&mut c, &mut next_id, &mut cells, &short);
+    platform.y = 1200.0;
+    c.set_scroll_offset(2, point(px(0.0), px(platform.y)), platform.applied);
+    c.commit();
+    // Rows above the viewport turn out taller, and the app scrolls to a
+    // row whose bottom would sit above the start: clamped to 0.
+    render_sized_binds(&mut c, &mut next_id, &mut cells, &|_| 80.0, usize::MAX);
+    c.apply(Op::Command {
+        id: 2,
+        command: Command::ScrollToIndex {
+            index: 1,
+            animated: false,
+            view_position: crate::geometry::Percentage(1.0),
+            view_offset: px(-36.0),
+        },
+    })
+    .unwrap();
+    let batch = c.commit().unwrap();
+    let scrolls = page_scrolls(&batch);
+    let by = match scrolls.as_slice() {
+        [(false, by), (true, to)] => {
+            assert_eq!(*to, 0.0);
+            *by
+        }
+        other => panic!("an anchoring ScrollBy, then the ScrollTo: {other:?}"),
+    };
+    // The platform applied the `ScrollBy` and reports before the
+    // `ScrollTo`.
+    platform.y += by;
+    platform.applied += 1;
+    c.set_scroll_offset(2, point(px(0.0), px(platform.y)), platform.applied);
+    let list = c.nodes[c.key(2).unwrap() as usize].list.as_ref().unwrap();
+    assert_eq!(list.offset, 0.0, "the ScrollTo is still on its way");
+    // The next commit does not chase the start with a relative scroll.
+    let batch = c.commit();
+    let scrolls = batch.as_ref().map(page_scrolls).unwrap_or_default();
+    assert!(scrolls.is_empty(), "{scrolls:?}");
+    // The `ScrollTo` lands at the start.
+    platform.y = 0.0;
+    platform.applied += 1;
+    c.set_scroll_offset(2, point(px(0.0), px(platform.y)), platform.applied);
+    platform.settle(&mut c, &mut next_id, &mut cells, &|_| 80.0);
+    assert_eq!(platform.y, 0.0);
+    let list = c.nodes[c.key(2).unwrap() as usize].list.as_ref().unwrap();
+    assert_eq!(list.offset, 0.0);
 }
 
 /// What `ref.measureScrollPosition()` of node `id` answers.
@@ -13601,6 +13775,12 @@ fn media_sources_load_the_url_the_check_granted() {
                 "//docs.example.com/v/../v.mp4".into(),
             ))),
         },
+        Op::SetProp {
+            id: 10,
+            prop: Prop::Native(NativeProp::Poster(Some(
+                "//docs.example.com/p/../poster.png".into(),
+            ))),
+        },
         Op::Insert {
             parent: ROOT_ID,
             child: 10,
@@ -13632,12 +13812,17 @@ fn media_sources_load_the_url_the_check_granted() {
         MountItem::NativeProps {
             id: 10,
             props: crate::NativeProps::Video(p),
-        } => Some(p.source.clone()),
+        } => Some(p),
         _ => None,
     });
+    let video = video.expect("the video's props");
     assert_eq!(
-        video.flatten().as_deref(),
+        video.source.as_deref(),
         Some("https://docs.example.com/v.mp4")
+    );
+    assert_eq!(
+        video.poster.as_deref(),
+        Some("https://docs.example.com/poster.png")
     );
 }
 
@@ -22091,6 +22276,9 @@ mod touch {
                 pressure: 0.5,
                 tilt_x: 0.0,
                 tilt_y: 0.0,
+                coalesced: Vec::new(),
+                eraser: false,
+                barrel: false,
             }],
         }))
     }
@@ -35772,6 +35960,9 @@ fn touch_down(path: Vec<NodeId>) -> EventPayload {
             pressure: 0.5,
             tilt_x: 0.0,
             tilt_y: 0.0,
+            coalesced: Vec::new(),
+            eraser: false,
+            barrel: false,
         }],
         modifiers: Default::default(),
         activated: None,
@@ -41934,6 +42125,49 @@ fn audio_session_reaches_the_video() {
         })
         .expect("the video's props");
     assert_eq!(props.audio_session, crate::AudioSession::Playback);
+}
+
+#[test]
+fn a_videos_poster_reaches_the_platform() {
+    // The image shown until the video's first frame is ready is the app's,
+    // not a platform extra.
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::Video,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Native(crate::NativeProp::Poster(Some(
+                    "https://example.com/poster.png".into(),
+                ))),
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    let items = c.commit().unwrap();
+    let props = items
+        .items
+        .iter()
+        .find_map(|item| match item {
+            MountItem::NativeProps {
+                id: 2,
+                props: crate::NativeProps::Video(v),
+            } => Some(v),
+            _ => None,
+        })
+        .expect("the video's props");
+    assert_eq!(
+        props.poster.as_deref(),
+        Some("https://example.com/poster.png")
+    );
 }
 
 #[test]
@@ -50915,6 +51149,103 @@ mod each_updates {
         }
     }
 
+    #[test]
+    fn long_lists_reversed_and_shuffled_keep_their_rows() {
+        // More rows than are searched without an index (`OldKeys`).
+        for shape in [Shape::Text, Shape::Pair, Shape::Region, Shape::Mixed] {
+            let start: Vec<Item> = (0..40).map(|k| (k, 1)).collect();
+            let (mut c, parent) = mounted(shape, &start);
+            let rows = |c: &Core<FakeEngine>| children(c, parent);
+            let before = rows(&c);
+            let shown_before = shown(&c, parent);
+            let reversed: Vec<Item> = start.iter().rev().copied().collect();
+            let items = set(&mut c, &reversed);
+            assert!(
+                !items
+                    .iter()
+                    .any(|i| matches!(i, MountItem::Create { .. } | MountItem::Delete { .. })),
+                "{shape:?}: a reversed row is moved, not made again"
+            );
+            assert_eq!(MADE.with(Cell::get), 40, "{shape:?}");
+            // Each row's texts (index left out), grouped by key: a row's
+            // view (`/made`) follows its text.
+            let by_key = |texts: Vec<String>| {
+                let mut rows: Vec<(u32, Vec<String>)> = Vec::new();
+                for t in texts {
+                    let t = t.split('@').next().unwrap().to_owned();
+                    if t == "before" || t == "after" {
+                        continue;
+                    }
+                    if t.starts_with('/') {
+                        rows.last_mut().unwrap().1.push(t);
+                    } else {
+                        let key = t.split(':').nth(1).unwrap().parse().unwrap();
+                        rows.push((key, vec![t]));
+                    }
+                }
+                rows
+            };
+            let mut expected = by_key(shown_before);
+            expected.reverse();
+            let now = by_key(shown(&c, parent));
+            assert_eq!(now, expected, "{shape:?}");
+            let mut kept = rows(&c);
+            kept.sort_unstable();
+            let mut was = before.clone();
+            was.sort_unstable();
+            assert_eq!(kept, was, "{shape:?}: the same nodes");
+            // A shuffle with rows added and removed.
+            let shuffled: Vec<Item> = (0..40)
+                .map(|i| ((i * 17) % 40, 1))
+                .filter(|&(k, _)| k % 7 != 3)
+                .chain([(100, 1), (101, 1)])
+                .collect();
+            set(&mut c, &shuffled);
+            let keys: Vec<u32> = shown(&c, parent)
+                .into_iter()
+                .filter(|t| t.contains('@'))
+                .map(|t| t.split(':').nth(1).unwrap().parse().unwrap())
+                .collect();
+            let wanted: Vec<u32> = shuffled
+                .iter()
+                .map(|&(k, _)| k)
+                .filter(|&k| parts(shape, k) > 0)
+                .collect();
+            assert_eq!(keys, wanted, "{shape:?}");
+            assert_eq!(MADE.with(Cell::get), 42, "{shape:?}");
+        }
+    }
+
+    /// `cargo test --release -p nsh-core --lib bench_each_reverse -- --ignored --nocapture`;
+    /// the numbers are in `docs/dev/performance.md`.
+    #[test]
+    #[ignore]
+    fn bench_each_reverse() {
+        println!("ms a commit (median of 5) | mount items");
+        for rows in [1_000u32, 4_000, 8_000] {
+            for (label, shape) in [("text", Shape::Text), ("text + view", Shape::Pair)] {
+                let start: Vec<Item> = (0..rows).map(|k| (k, 0)).collect();
+                let reversed: Vec<Item> = start.iter().rev().copied().collect();
+                let rotated: Vec<Item> = (1..rows).chain([0]).map(|k| (k, 0)).collect();
+                for (step, to) in [("reverse", &reversed), ("first to last", &rotated)] {
+                    let mut times = Vec::new();
+                    let mut items = 0;
+                    for _ in 0..5 {
+                        let (mut c, _) = mounted(shape, &start);
+                        let at = Instant::now();
+                        items = set(&mut c, to).len();
+                        times.push(at.elapsed().as_secs_f64() * 1e3);
+                    }
+                    times.sort_by(f64::total_cmp);
+                    println!(
+                        "{rows:>5} rows of {label:<11} {step:<13} | {:>8.2} | {items}",
+                        times[2]
+                    );
+                }
+            }
+        }
+    }
+
     thread_local! {
         /// [`MountRows`] in a scroll view, which culls the rows it does
         /// not show.
@@ -56621,4 +56952,59 @@ mod resolved_style_cache {
             total_items / rounds
         );
     }
+}
+
+/// `allowNavigation` reaches the web view's backend as host patterns, and
+/// a list with a pattern that does not read is refused with a message and
+/// leaves the web view not narrowed.
+#[test]
+fn allow_navigation_reaches_the_web_view() {
+    let narrowed = |hosts: &[&str]| {
+        let mut c = core();
+        c.set_access(Arc::new(crate::access::Access {
+            declared: crate::access::Capabilities::from_json(
+                &serde_json::json!({ "webview": { "hosts": ["*"] } }),
+            )
+            .unwrap(),
+            granted: None,
+        }));
+        let prop = Prop::Native(NativeProp::AllowNavigation(Some(
+            hosts.iter().map(|h| Arc::<str>::from(*h)).collect(),
+        )));
+        apply(
+            &mut c,
+            vec![
+                Op::Create {
+                    id: 2,
+                    tag: Tag::WebView,
+                },
+                Op::SetProp { id: 2, prop },
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+            ],
+        );
+        let batch = c.commit().unwrap();
+        let hosts = batch.items.iter().rev().find_map(|i| match i {
+            MountItem::NativeProps {
+                id: 2,
+                props: crate::NativeProps::WebView(p),
+            } => Some(p.allow_navigation.clone()),
+            _ => None,
+        });
+        (hosts.flatten(), c.denied.clone())
+    };
+    let (hosts, denied) = narrowed(&["127.0.0.1", "*.localhost"]);
+    let hosts = hosts.expect("narrowed");
+    assert!(hosts.allows("http://127.0.0.1:8001/"));
+    assert!(!hosts.allows("http://127.0.0.1:8002.evil.test/"));
+    assert!(denied.is_empty(), "{denied:?}");
+    let (hosts, denied) = narrowed(&["http://127.0.0.1:*"]);
+    assert!(hosts.is_none());
+    assert!(
+        denied.iter().any(|m| m.starts_with("`allowNavigation`")),
+        "{denied:?}"
+    );
 }

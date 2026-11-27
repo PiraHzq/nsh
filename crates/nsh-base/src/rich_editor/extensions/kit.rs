@@ -18,7 +18,10 @@ use serde_json::{Value, json};
 
 use super::{
     clear_document::clear_document,
-    code_block::{CodeBlockOptions, code_block_keymap, fence_language},
+    code_block::{
+        CODE_BLOCK_HIGHLIGHT, CodeBlockHighlightOptions, CodeBlockOptions,
+        code_block_highlight_plugin_with, code_block_keymap, fence_language,
+    },
     core_keymap::core_keymap as core_bindings,
     extension::{Extension, GlobalAttributes},
     helpers::{set_hard_break, update_attribute},
@@ -653,6 +656,37 @@ fn set_horizontal_rule(state: &EditorState, dispatch: Dispatch<'_>, ty: &NodeTyp
     true
 }
 
+/// `codeBlockHighlight` (like Tiptap's `CodeBlockLowlight`, but beside
+/// `codeBlock` rather than in its place): code blocks colored by their
+/// `language` with the highlighting `TextView`'s code blocks have, its
+/// syntaxes and palette. Part of [`starter_kit`]; `{ codeBlockHighlight:
+/// false }` leaves code plain. Needs feature `highlight`. Its option
+/// `defaultLanguage` (Tiptap's) colors the blocks that name no language;
+/// without it they stay plain.
+pub fn code_block_highlight() -> Extension {
+    code_block_highlight_with(CodeBlockHighlightOptions::default())
+}
+
+/// [`code_block_highlight`] with the language of blocks that name none:
+/// `options.detect_language` (the app's guess from the code) and then
+/// `options.default_language` (the extension's `defaultLanguage`, which
+/// `configure` can still set). The language is the view's; the document
+/// keeps none.
+pub fn code_block_highlight_with(options: CodeBlockHighlightOptions) -> Extension {
+    Extension::new(CODE_BLOCK_HIGHLIGHT)
+        .with_options(json!({ "defaultLanguage": options.default_language }))
+        .add_plugins(move |cx| {
+            let mut options = options.clone();
+            options.default_language = cx
+                .options
+                .get("defaultLanguage")
+                .and_then(Value::as_str)
+                .filter(|l| !l.is_empty())
+                .map(str::to_owned);
+            vec![code_block_highlight_plugin_with(options)]
+        })
+}
+
 /// `codeBlock` with Tiptap's options (`exitOnTripleEnter`,
 /// `exitOnArrowDown`, `exitOnArrowUp`, `enableTabIndentation`, `tabSize`):
 /// its keys, fences; `setCodeBlock({ language })`, `toggleCodeBlock`.
@@ -1174,6 +1208,7 @@ pub fn starter_kit_extensions() -> Vec<(&'static str, Extension)> {
         ("horizontalRule", horizontal_rule()),
         ("heading", heading()),
         ("codeBlock", code_block()),
+        ("codeBlockHighlight", code_block_highlight()),
         ("text", text()),
         ("image", image()),
         ("hardBreak", hard_break()),

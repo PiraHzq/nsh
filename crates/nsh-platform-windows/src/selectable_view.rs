@@ -265,13 +265,16 @@ struct Current {
     reported: Selected,
 }
 
-/// What `onSelectionChange` reports: the selected text, where it starts and
-/// the box around it in the area.
+/// What `onSelectionChange` reports: the selected text, where it starts,
+/// the box around it in the area and its ends.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Selected {
     text: String,
     start: u32,
     bounds: Option<Bounds<Points>>,
+    /// The anchor's and the focus's text nodes and offsets
+    /// (`SelectionModel::ends`), which the core places in list items.
+    ends: Option<[(u64, u32); 2]>,
 }
 
 impl Current {
@@ -436,6 +439,7 @@ fn report(surface: u64) {
                 text: current.model.text(&texts),
                 start: current.model.start_offset(&texts),
                 bounds: current.model.selected_bounds(&texts),
+                ends: current.model.ends(&texts),
             }
         };
         if selected != current.reported {
@@ -460,7 +464,18 @@ fn send(surface: &Surface, id: NodeId, selected: Selected) {
     if let Some(bounds) = selected.bounds {
         fields.push(("bounds", PayloadValue::Bounds(bounds)));
     }
+    if let Some(ends) = selected.ends {
+        fields.extend(nsh_core::selection::end_fields(ends));
+    }
     surface.event(id, EventKind::SelectionChange, EventPayload::Map(fields));
+}
+
+/// `ref.selectAll()` on `view` (`Command::SelectAll`): selects every text
+/// of the selectable view `view` is or is inside, as Ctrl+A does.
+pub(crate) fn select_in(surface: &Surface, view: &NshView) {
+    if let Some(area) = area_of(view) {
+        select_all(surface.key(), &area);
+    }
 }
 
 /// `ref.clearSelection()` on `view` (`Command::ClearSelection`): ends the

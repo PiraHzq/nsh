@@ -13,7 +13,6 @@ pub use byte_size::ByteSize;
 pub mod access;
 pub mod animation;
 pub mod audio;
-pub mod auth_session;
 pub mod canvas;
 pub mod clipboard;
 pub mod color;
@@ -29,6 +28,7 @@ pub mod file_dialog;
 pub mod file_type;
 pub mod filesystem;
 pub mod geometry;
+pub mod gpu;
 mod grid;
 pub mod host_channel;
 pub mod i18n;
@@ -136,7 +136,7 @@ pub use crate::{
         VideoProps, ViewKind, WebProps,
     },
     ops::{
-        AutoCapitalize, AutoFill, BackPhase, BackProgressEvent, CellSlot, Command,
+        AutoCapitalize, AutoFill, BackPhase, BackProgressEvent, CellSlot, CoalescedSample, Command,
         ContextMenuEvent, Dialog, DialogButton, DialogButtonStyle, DialogInput, EditAction,
         EventKind, EventMask, EventPayload, FileContents, FpsMode, Haptic, HapticImpact,
         HapticNotification, HeaderItem, HeaderItemContent, HeaderSlot, HeaderSystemItem,

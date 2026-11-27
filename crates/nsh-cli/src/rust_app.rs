@@ -2068,6 +2068,7 @@ const NSH_CRATES: &[&str] = &[
     "nsh-package",
     "nsh-js",
     "nsh-engine",
+    "nsh-gpu",
     "nsh-testing",
     "nsh-bundler",
     "nsh-dev",
@@ -2503,10 +2504,16 @@ impl RustApp {
     }
 
     /// Its crates' packages, for what the steps say they build
-    /// (`charts, storage`).
+    /// (`charts, storage`), counted past two (`4 crates`): a step's line
+    /// stays one short line however many crates the app has.
     fn packages(&self) -> String {
-        let packages: Vec<&str> = self.crates.iter().map(|c| c.package.as_str()).collect();
-        packages.join(", ")
+        match self.crates.len() {
+            0..=2 => {
+                let packages: Vec<&str> = self.crates.iter().map(|c| c.package.as_str()).collect();
+                packages.join(", ")
+            }
+            n => format!("{n} crates"),
+        }
     }
 
     /// Whether `path` is part of the app's Rust code (the sources and
@@ -2608,11 +2615,12 @@ impl RustApp {
     }
 
     /// What the steps say they build: `the Rust crate charts`, `the Rust
-    /// crates charts, storage`.
+    /// crates charts, storage`, `4 Rust crates`.
     fn crates_what(&self) -> String {
         match self.crates.as_slice() {
             [one] => format!("the Rust crate {}", one.package),
-            _ => format!("the Rust crates {}", self.packages()),
+            [_, _] => format!("the Rust crates {}", self.packages()),
+            crates => format!("{} Rust crates", crates.len()),
         }
     }
 
@@ -4602,7 +4610,9 @@ fn set_deployment_target(
 /// this CLI, the workspace's manifests and lock file, the package's
 /// generated files, the command line and the environment Cargo reads, and
 /// the binary's size and time. An app's own crates and nshm from a
-/// directory can change at any time: their builds are always Cargo's.
+/// directory can change at any time: their builds are always Cargo's. So
+/// is a build with the app's crates retargeted into `app-crates/`: those
+/// manifests name the app's own sources, which nothing here hashes.
 struct BuiltOnce {
     record: PathBuf,
     fingerprint: String,
@@ -4616,6 +4626,9 @@ impl BuiltOnce {
         let installed =
             nsh_bundler::nshm::installed_dir().and_then(|d| dunce::canonicalize(d).ok());
         let workspace = dunce::canonicalize(workspace).ok()?;
+        if workspace.join("app-crates").exists() {
+            return None;
+        }
         let mut hash = sha2::Sha256::new();
         hash.update(concat!(env!("CARGO_PKG_VERSION"), "\n").as_bytes());
         // This nsh: another build of it may generate other code.
@@ -5076,6 +5089,40 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A build that links only generated code is Cargo's once; one with the
+    /// app's crates retargeted into `app-crates/` (manifests that name the
+    /// app's own sources) is always Cargo's.
+    #[test]
+    fn a_retargeted_build_is_always_cargos() {
+        let dir = std::env::temp_dir().join(format!("nsh-built-once-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let member = dir.join("rust-ios");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"rust-ios\"]\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("Cargo.lock"), "").unwrap();
+        std::fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"rust-ios\"\n\n[dependencies]\n\
+             app = { path = \"../app-crates/app\" }\n",
+        )
+        .unwrap();
+        let cmd = std::process::Command::new("cargo");
+        assert!(super::BuiltOnce::of(&dir, "rust-ios", &cmd).is_some());
+        let app = dir.join("app-crates/app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[lib]\npath = \"/elsewhere/app/src/lib.rs\"\n",
+        )
+        .unwrap();
+        assert!(super::BuiltOnce::of(&dir, "rust-ios", &cmd).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// What `nsh.json`'s `"watch"` names is out of the watcher's events.
     #[test]
     fn a_watch_ignore_takes_its_events_out() {
@@ -5185,6 +5232,33 @@ mod tests {
             minimums: crate::apple::AppleMinimums::default(),
             shared: false,
         }
+    }
+
+    /// A step names one or two crates and counts more, so its line stays
+    /// short.
+    #[test]
+    fn steps_name_two_crates_and_count_more() {
+        let dir = Path::new("/app");
+        let named = |packages: &[&str]| {
+            let crates: Vec<(&str, PathBuf)> = packages.iter().map(|p| (*p, dir.join(p))).collect();
+            let app = app(dir, &crates, None);
+            (app.crates_what(), app.packages())
+        };
+        assert_eq!(
+            named(&["charts"]),
+            ("the Rust crate charts".to_owned(), "charts".to_owned())
+        );
+        assert_eq!(
+            named(&["charts", "storage"]),
+            (
+                "the Rust crates charts, storage".to_owned(),
+                "charts, storage".to_owned()
+            )
+        );
+        assert_eq!(
+            named(&["nsh-extra", "nsh-icon", "nsh-icon-lucide", "nsmetry"]),
+            ("4 Rust crates".to_owned(), "4 crates".to_owned())
+        );
     }
 
     /// Builds for an Apple system get the deployment target of the app's
