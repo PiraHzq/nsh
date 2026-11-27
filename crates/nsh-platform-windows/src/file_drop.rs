@@ -7,7 +7,7 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use nsh_core::{EventKind, EventPayload, NodeId};
+use nsh_core::{EventKind, EventPayload, NodeId, Points};
 use windows::{
     Win32::{
         Foundation::{POINT, POINTL},
@@ -146,20 +146,11 @@ fn update(surface: &Surface, point: &POINTL, effect: *mut DROPEFFECT) {
     }
     // SAFETY: OLE supplies an in/out effect pointer for this callback.
     let copy_allowed = unsafe { (*effect).0 & DROPEFFECT_COPY.0 != 0 };
-    let mut client = POINT {
-        x: point.x,
-        y: point.y,
-    };
-    // SAFETY: the surface owns the destination HWND; client is writable.
     let target = if copy_allowed
         && surface.file_drop.offered.get()
-        && unsafe { ScreenToClient(surface.hwnd(), &mut client) }.as_bool()
+        && let Some((x, y)) = client_points(surface, point)
     {
-        input::file_drop_target(
-            surface,
-            client.x as f32 / surface.scale(),
-            client.y as f32 / surface.scale(),
-        )
+        input::file_drop_target(surface, x, y)
     } else {
         None
     };
@@ -172,6 +163,22 @@ fn update(surface: &Surface, point: &POINTL, effect: *mut DROPEFFECT) {
         }
     };
     set_target(surface, target);
+}
+
+/// OLE's drag point (`point`, screen pixels) in the window's client area,
+/// in points: the root coordinates pointer input and hit testing use.
+fn client_points(surface: &Surface, point: &POINTL) -> Option<(f32, f32)> {
+    let mut client = POINT {
+        x: point.x,
+        y: point.y,
+    };
+    // SAFETY: the surface owns the destination HWND; client is writable.
+    unsafe { ScreenToClient(surface.hwnd(), &mut client) }
+        .as_bool()
+        .then(|| {
+            let scale = surface.scale();
+            (client.x as f32 / scale, client.y as f32 / scale)
+        })
 }
 
 fn format() -> FORMATETC {
@@ -222,6 +229,32 @@ fn files(data: &IDataObject) -> Vec<String> {
     // released exactly once; DragFinish would incorrectly free it twice.
     unsafe { ReleaseStgMedium(&mut medium) };
     uris
+}
+
+#[cfg(feature = "dev")]
+/// Drops `uris` at `x`, `y` (points, root coordinates) as a file
+/// manager's drag ends there, for the test agent: false when no view there
+/// takes file drops.
+pub(crate) fn drop_uris(surface: &Surface, x: f32, y: f32, uris: Vec<String>) -> bool {
+    let Some(destination) = input::file_drop_target(surface, x, y) else {
+        return false;
+    };
+    if uris.is_empty() {
+        return false;
+    }
+    *surface.file_drop.uris.borrow_mut() = uris.clone();
+    set_target(surface, Some(destination.clone()));
+    surface.event(
+        destination.id(),
+        EventKind::FileDrop,
+        EventPayload::FileDropAt {
+            uris,
+            page_position: nsh_core::prelude::point(nsh_core::Points(x), nsh_core::Points(y)),
+        },
+    );
+    surface.file_drop.uris.borrow_mut().clear();
+    set_target(surface, None);
+    true
 }
 
 #[implement(IDropTarget)]
@@ -301,12 +334,13 @@ impl IDropTarget_Impl for Destination_Impl {
             };
             if let Some(target) = target
                 && !uris.is_empty()
+                && let Some((x, y)) = client_points(&surface, point)
             {
-                surface.event(
-                    target.id(),
-                    EventKind::FileDrop,
-                    EventPayload::FileDrop(uris),
-                );
+                let payload = EventPayload::FileDropAt {
+                    uris,
+                    page_position: nsh_core::prelude::point(Points(x), Points(y)),
+                };
+                surface.event(target.id(), EventKind::FileDrop, payload);
             } else if !effect.is_null() {
                 // SAFETY: OLE's callback output pointer.
                 unsafe { *effect = DROPEFFECT_NONE };

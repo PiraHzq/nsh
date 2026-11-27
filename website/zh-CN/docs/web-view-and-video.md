@@ -16,7 +16,7 @@ Web 视图和视频播放器把平台自己的网页引擎和媒体播放器作�
 
 它们背后的框架（WebKit、AVFoundation）在应用第一次用到时才加载，所以从不显示网页或视频的应用不会在启动时为它们付出代价。
 
-页面播放的视频在每个平台上都在 Web 视图里播放，iPhone 也一样——否则 WebKit 会把第一帧交给系统的全屏播放器（页面上的 `playsinline` 拦不住）。页面自己的控件要求全屏时，仍然交给系统全屏。
+页面播放的视频在每个平台上都在 Web 视图里播放，iPhone 也一样——否则 WebKit 会把第一帧交给系统的全屏播放器（页面上的 `playsinline` 拦不住）。页面自己的控件要求全屏时，仍能占满整个屏幕：在 Apple 的 Web 视图上，`element.requestFullscreen()` 会像在浏览器里一样接管屏幕。Android 的 Web 视图还没有自己的全屏，页面上的控件在那里不起作用。
 
 在 [macOS](./macos.md) 上，Web 视图没有自己的滚动视图：`scrollable={false}` 时，鼠标滚轮和触控板滚动的是它外面的应用滚动视图，
 而不是页面；页面仍可用键盘和它自己的脚本滚动。
@@ -82,7 +82,7 @@ pub fn App() -> impl IntoElement {
 | `injectedJavaScript` | `string` | | 每个页面加载完成后运行。 |
 | `injectedJavaScriptBeforeContentLoaded` | `string` | | 在每个页面自己的脚本之前运行。 |
 | `javaScriptEnabled` | `boolean` | `true` | 页面可以运行脚本。 |
-| `scrollable` | `boolean` | `true` | 用户可以滚动页面。 |
+| `scrollable` | `boolean` | `true` | 用户可以滚动页面。关闭时页面仍会收到触摸，它自己的拖动处理（滑块、拖拽排序）照常工作，脚本也仍可滚动它。 |
 | `userAgent` | `string` | | 浏览器的 user agent 字符串。 |
 | `incognito` | `boolean` | `false` | 页面的网站数据只与网页视图同存亡，各平台的做法见[下文](#网站数据)。在网页视图创建时读取。 |
 | `zoomable` | `boolean` | `false` | 用户可以双指缩放页面，也可以超出页面 viewport 的缩放限制：Android 上是内置缩放（不显示缩放按钮），iOS 上忽略 viewport 的缩放限制，macOS 上是放大。关闭时保持各平台自己的行为（Android 和 macOS 不缩放，iOS 在 viewport 允许的范围内缩放，Windows 可以缩放）。在网页视图创建时读取。 |

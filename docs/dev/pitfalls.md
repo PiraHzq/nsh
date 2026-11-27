@@ -151,6 +151,9 @@ Things that were found the hard way. Read the section of the area you change bef
   become the first responder and take typed text. Without it a hidden input (the `Editor`'s sink at its caret) takes
   the touches of whatever lies under it. A JS responder that blocks also cancels the `PressRecognizer`s of the views
   around it (`set_js_responder`): they keep tracking a finger a descendant took, and its lift was a press on them.
+- **UIKit repeats a held Delete only while the input has text** (`hasText`) before its caret: in an empty input the
+  keyboard deletes once. A sink (no caret and transparent text, `is_sink`: an editor's, which holds the text itself)
+  answers `hasText` YES whatever it holds, and the `RichEditor` keeps the text before its caret in its sink.
 
 - **Retained navigation tabs hide the stack's container or an ancestor, not the navigation controller's view**:
   check the entire ancestor chain before a stack updates a shared system tab bar, including from transition
@@ -242,6 +245,10 @@ Things that were found the hard way. Read the section of the area you change bef
   range the text never had (`NSMutableRLEArray` out of bounds). Inserting other text from the delegate during that
   paste crashes the same way. An input with `maxLength` therefore pastes by itself (`input::paste_text`): it clips the
   text, asks the delegate and calls `insertText:`, whose undo is right.
+- **An input method's marked range and caret are drawn in the input's tint whatever its colors**: an editor's sink
+  (transparent text, `caret={false}`, whose `caretRectForPosition:` is empty) showed UIKit's blue marked range and
+  caret at the editor's caret while composing pinyin. An input that draws no caret and no text is tinted clear
+  (`input.rs`, `is_sink`); an app's `caret={false}` input with visible text keeps its tint for the selection.
 - **UIKit passes nil where `UITextInput` declares a position or range nonnull** (a secondary click on selectable text
   with nothing selected moves a nil position): a method a class defines with `define_class!` takes these as `Option`,
   since a `&T` is a null reference then and objc2's debug-build nil check on messaging it aborts the app.
@@ -298,6 +305,10 @@ Things that were found the hard way. Read the section of the area you change bef
   transforms around a view, and only on its own layout passes, so a pass while a container shows a stack scaled or
   moved aside leaves the stack the insets of that picture after the transform is gone. A stack's safe area follows
   where it is laid out: the navigation controller makes up what a transform takes away.
+- **iOS, a container's transform can move a stack's bar**: the same passes place the navigation bar for the
+  transformed picture, which puts a bar the device keeps along one side (the iPhone Duo's vertical bar) on the
+  wrong side, and nothing moves it back when the transform goes. A stack under a transform whose header changes,
+  and a stack whose surrounding transform returns to the identity, are laid out again for where the stack is.
 - **iPadOS 26, the window controls' corner**: `safeAreaInsets` leaves out the controls a windowed app has at its
   top-leading corner; the safe-area layout region with horizontal corner adaptation
   (`edgeInsetsForLayoutRegion:`) covers them, and also pads both sides alike for the display's rounded corners

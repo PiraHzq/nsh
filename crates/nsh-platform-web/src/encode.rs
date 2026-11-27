@@ -1224,6 +1224,12 @@ pub(crate) fn encode(out: &mut Out, item: &MountItem) {
                 if !run.after.is_empty() {
                     out.s.push(',');
                     push_str(&mut out.s, &run.after);
+                } else if run.line_height.is_some() {
+                    out.s.push_str(",null");
+                }
+                // Its line's height, when not its own.
+                if let Some(height) = run.line_height {
+                    let _ = write!(out.s, ",{height}");
                 }
                 out.s.push(']');
             }
@@ -1865,9 +1871,9 @@ fn encode_command(out: &mut Out, id: u32, command: &Command) {
             (true, nsh_core::desktop::DesktopCommand::Quit) => {
                 out.item("cmd").num(id).str("quit").end();
             }
-            _ => log::debug!("web: command {desktop:?} is not supported"),
+            _ => nsh_core::platform::warn_unsupported("web", desktop),
         },
-        other => log::debug!("web: command {other:?} is not supported"),
+        other => nsh_core::platform::warn_unsupported("web", other),
     }
 }
 

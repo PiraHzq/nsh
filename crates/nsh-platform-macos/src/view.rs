@@ -423,6 +423,9 @@ pub(crate) struct Ivars {
     content: RefCell<Option<(Retained<CALayer>, Retained<Drawer>)>>,
     /// A canvas's small animated suffix, above its static content.
     overlay: RefCell<Option<(Retained<CALayer>, Retained<Drawer>)>>,
+    /// A panned canvas's content layer draws past its bounds: this layer
+    /// holds it and clips it to them ([`NshView::clip_content`]).
+    pan_clip: RefCell<Option<Retained<CALayer>>>,
     /// Its content changed while it could not be seen
     /// ([`crate::mount::Mounter::draw_when_shown`]).
     stale: Cell<bool>,
@@ -1658,6 +1661,70 @@ fn foreign_mark(holder: &NSView) -> Option<&Cell<bool>> {
     holder.downcast_ref::<ViewObj>().map(|v| &v.ivars().foreign)
 }
 
+/// Whether `view`, already a subview of `container`, holds its window's
+/// keyboard focus: re-adding it to `container` would take the focus out
+/// of it (AppKit removes a view before adding it again).
+fn holds_focus(container: &NSView, view: &NSView) -> bool {
+    if superview(view).as_deref() != Some(container) {
+        return false;
+    }
+    let Some(responder) = view.window().and_then(|w| w.firstResponder()) else {
+        return false;
+    };
+    responder
+        .downcast_ref::<NSView>()
+        .is_some_and(|focused| focused.isDescendantOf(view))
+}
+
+/// Moves `view`, a subview of `container`, below `above` (to the top
+/// without one) by moving its siblings around it, so `view` never leaves
+/// `container` and keeps the keyboard focus (a press that raises the
+/// panel it focused, #3244). Siblings already in place stay.
+fn restack_around(container: &NSView, view: &NSView, above: Option<&NSView>) {
+    let siblings: Vec<Retained<NSView>> = container
+        .subviews()
+        .iter()
+        .filter(|v| !std::ptr::eq(&**v, view))
+        .collect();
+    let at = above
+        .and_then(|a| siblings.iter().position(|v| std::ptr::eq(&**v, a)))
+        .unwrap_or(siblings.len());
+    // Whether `lower` is directly below `upper` in `container`.
+    let adjacent = |lower: &NSView, upper: &NSView| {
+        let subviews = container.subviews();
+        let mut previous: Option<Retained<NSView>> = None;
+        for sub in subviews.iter() {
+            if std::ptr::eq(&*sub, upper) {
+                return previous.is_some_and(|p| std::ptr::eq(&*p, lower));
+            }
+            previous = Some(sub);
+        }
+        false
+    };
+    let mut upper: Retained<NSView> = Retained::from(view);
+    for sibling in siblings[..at].iter().rev() {
+        if !adjacent(sibling, &upper) {
+            container.addSubview_positioned_relativeTo(
+                sibling,
+                NSWindowOrderingMode::Below,
+                Some(&upper),
+            );
+        }
+        upper = sibling.clone();
+    }
+    let mut lower: Retained<NSView> = Retained::from(view);
+    for sibling in &siblings[at..] {
+        if !adjacent(&lower, sibling) {
+            container.addSubview_positioned_relativeTo(
+                sibling,
+                NSWindowOrderingMode::Above,
+                Some(&lower),
+            );
+        }
+        lower = sibling.clone();
+    }
+}
+
 /// The lowest subview of `holder` that is not ours ([`is_ours`]), the one
 /// an appended child goes below: what a scan of its subviews finds.
 ///
@@ -1827,6 +1894,7 @@ impl NshView {
             tracking: Cell::new(false),
             content: RefCell::new(None),
             overlay: RefCell::new(None),
+            pan_clip: RefCell::new(None),
             stale: Cell::new(false),
             unplaced: Cell::new(false),
             // Not known until a first scan.
@@ -2123,6 +2191,9 @@ impl NshView {
         if let Some((layer, _)) = self.ivars().overlay.borrow_mut().take() {
             layer.removeFromSuperlayer();
         }
+        if let Some(clip) = self.ivars().pan_clip.borrow_mut().take() {
+            clip.removeFromSuperlayer();
+        }
         self.ivars().rastered.set(false);
         self.clear_canvas_painted();
     }
@@ -2236,7 +2307,13 @@ impl NshView {
             self.clear_content_layers();
             return None;
         };
-        if let Some((layer, _)) = &*self.ivars().content.borrow() {
+        let existing = self
+            .ivars()
+            .content
+            .borrow()
+            .as_ref()
+            .map(|(l, _)| l.clone());
+        if let Some(layer) = existing {
             let frame_changed = layer.frame() != bounds;
             if frame_changed {
                 let resized = layer.bounds().size != bounds.size;
@@ -2245,7 +2322,8 @@ impl NshView {
                     layer.setContentsScale(self.content_scale(bounds.size));
                 }
             }
-            return Some((layer.clone(), frame_changed));
+            self.clip_content(&layer);
+            return Some((layer, frame_changed));
         }
         let host = self.ns().layer()?;
         let mtm = MainThreadMarker::from(&*self.0);
@@ -2281,7 +2359,85 @@ impl NshView {
         layer.setFrame(bounds);
         host.addSublayer(&layer);
         *self.ivars().content.borrow_mut() = Some((layer.clone(), drawer));
+        self.clip_content(&layer);
         Some((layer, true))
+    }
+
+    /// Puts a panned canvas's content layer, which draws
+    /// [`crate::canvas::PAN_MARGIN`] past each side of the view, in a layer
+    /// clipping it to the view's bounds (a rectangle: no offscreen pass),
+    /// and any other back in the view's layer.
+    fn clip_content(&self, layer: &CALayer) {
+        let panned = self.state().canvas.as_ref().is_some_and(|c| c.is_panned());
+        let Some(host) = self.ns().layer() else {
+            return;
+        };
+        let mut clip = self.ivars().pan_clip.borrow_mut();
+        if !panned {
+            if let Some(c) = clip.take() {
+                crate::surface::quiet(|| {
+                    host.addSublayer(layer);
+                    c.removeFromSuperlayer();
+                });
+            }
+            return;
+        }
+        let size = self.ns().frame().size;
+        let bounds = CGRect::new(CGPoint::new(0.0, 0.0), size);
+        crate::surface::quiet(|| {
+            let c = clip.get_or_insert_with(|| {
+                let c = CALayer::new();
+                c.setAnchorPoint(CGPoint::new(0.0, 0.0));
+                c.setMasksToBounds(true);
+                // Where the content layer would be.
+                c.setZPosition(crate::decor::BEHIND / 2.0);
+                host.addSublayer(&c);
+                c
+            });
+            if c.frame() != bounds {
+                c.setFrame(bounds);
+            }
+            if !layer.superlayer().is_some_and(|s| std::ptr::eq(&*s, &**c)) {
+                c.addSublayer(layer);
+            }
+        });
+    }
+
+    /// Moves a panned canvas's content layer with its pan
+    /// ([`crate::canvas::CanvasState::pan_shift`]) without drawing it
+    /// again: Core Animation composites the picture it holds where the pan
+    /// puts it.
+    pub(crate) fn shift_canvas(&self) {
+        let panned = self.state().canvas.as_ref().is_some_and(|c| c.is_panned());
+        if !panned {
+            return;
+        }
+        let Some(bounds) = self.desired_content_bounds() else {
+            return;
+        };
+        if let Some((layer, _)) = &*self.ivars().content.borrow() {
+            let frame = layer.frame();
+            if frame != bounds
+                && frame.size.width == bounds.size.width
+                && frame.size.height == bounds.size.height
+            {
+                layer.setFrame(bounds);
+            }
+            // Where its next drawing around the pan happens: a drag keeps it
+            // on Core Animation's threads from that drawing on, not only
+            // from the one after (`drawLayer:inContext:` sets it after a
+            // paint).
+            let asynchronous = self
+                .state()
+                .canvas
+                .as_ref()
+                .is_some_and(|c| c.draws_asynchronously());
+            if self.ivars().overlay.borrow().is_none()
+                && layer.drawsAsynchronously() != asynchronous
+            {
+                layer.setDrawsAsynchronously(asynchronous);
+            }
+        }
     }
 
     /// Its content layer got a new size: drawn again when it can be seen.
@@ -2562,6 +2718,12 @@ impl NshView {
             }
             if old_size != rect.size {
                 self.resize_content_layers();
+                // A scroll view's indicator is sized and placed from its
+                // frame: follow every frame a layout animation writes,
+                // not only scroll ticks and content changes (#3188).
+                if self.state().scroll.is_some() {
+                    crate::scroll::update_overlays(self);
+                }
             }
         }
         // AppKit sizes a view's layer only while the view is in a
@@ -2583,12 +2745,22 @@ impl NshView {
             self.clear_content_layers();
             return;
         };
-        let resized = match &*self.ivars().content.borrow() {
-            Some((layer, _)) => {
+        let content = self
+            .ivars()
+            .content
+            .borrow()
+            .as_ref()
+            .map(|(l, _)| l.clone());
+        // A view asked to draw while its box was empty made no content layer
+        // and drew nothing.
+        let had_layer = content.is_some();
+        let resized = match content {
+            Some(layer) => {
                 let changed = layer.frame() != bounds;
                 if changed {
                     layer.setFrame(bounds);
                 }
+                self.clip_content(&layer);
                 changed
             }
             // A canvas whose drawing was omitted while the view had zero size
@@ -2599,8 +2771,11 @@ impl NshView {
             return;
         }
         // A text's box changes with its own `MountItem::Text`, which says
-        // whether it draws again, unless its picture was cut.
-        let keeps = self.state().text.as_ref().is_some_and(|t| !t.cut.get());
+        // whether it draws again, unless its picture was cut, or it has no
+        // picture at all: a text that got its content while its box was still
+        // empty (a new view whose frame a live resize holds back, `unplaced`)
+        // drew nothing then, and its `MountItem::Text` will not come again.
+        let keeps = had_layer && self.state().text.as_ref().is_some_and(|t| !t.cut.get());
         if !keeps {
             self.content_resized();
         }
@@ -2743,15 +2918,44 @@ impl NshView {
         self.insert_view(parent, before);
     }
 
-    fn insert_view(&self, parent: &NshView, before: Option<&NshView>) {
-        let container = parent.container();
-        let above = match before {
+    /// The view a child inserted into `parent` below `before` goes below
+    /// (none: on top).
+    fn stacked_under(
+        parent: &NshView,
+        container: &NSView,
+        before: Option<&NshView>,
+    ) -> Option<Retained<NSView>> {
+        match before {
             Some(b) => Some(Retained::from(b.ns())),
             // A lifted input's pad is not what children stack under: it
             // rides directly above its own anchor, out of their way.
-            None => first_foreign(&container).filter(|v| !parent.is_raised(v)),
-        };
-        match above {
+            None => first_foreign(container).filter(|v| !parent.is_raised(v)),
+        }
+    }
+
+    /// Moves it, already a view in `parent`, below `before` without taking
+    /// it out of `parent` when it holds the keyboard focus: AppKit drops
+    /// the focus of a view removed from its superview, so a press that
+    /// raises (zIndex) the panel it focused would lose it (#3244). Whether
+    /// it did: otherwise the caller takes it out and inserts it again.
+    pub(crate) fn restack_focused(&self, parent: &NshView, before: Option<&NshView>) -> bool {
+        if self.is_leaf_layer() || parent.is_leaf_layer() {
+            return false;
+        }
+        let container = parent.container();
+        if !holds_focus(&container, self.ns()) {
+            return false;
+        }
+        let above = Self::stacked_under(parent, &container, before);
+        restack_around(&container, self.ns(), above.as_deref());
+        parent.raise_natives();
+        self.place();
+        true
+    }
+
+    fn insert_view(&self, parent: &NshView, before: Option<&NshView>) {
+        let container = parent.container();
+        match Self::stacked_under(parent, &container, before) {
             Some(above) => container.addSubview_positioned_relativeTo(
                 self.ns(),
                 NSWindowOrderingMode::Below,

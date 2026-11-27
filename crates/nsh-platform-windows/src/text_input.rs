@@ -670,14 +670,11 @@ impl InputState {
     /// farthest it goes (the last line at the content box's bottom).
     /// Clamp the wheel to the text's height rather than scrolling past its end.
     fn text_scroll(&self) -> Option<(i32, i32)> {
-        let client = self.client();
         self.with_editor(|e| {
             let mut at = windows::Win32::Foundation::POINT::default();
             e.send(EM_GETSCROLLPOS, 0, &mut at as *mut _ as isize);
-            let height = e.text_height(client.right - client.left)?;
-            Some((at.y, (height - (client.bottom - client.top)).max(0)))
+            (at.y, e.scroll_limit())
         })
-        .flatten()
     }
 
     /// RichEdit's client rectangle: the content box in the window's client
@@ -2625,12 +2622,28 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
 /// paste.
 fn paste(surface: &Surface, view: &NshView, input: &InputState) {
     let text = crate::system::clipboard_text();
+    let mut paste = nsh_core::PasteEvent::new(text.unwrap_or_default());
     if view.state().events.contains(EventKind::Paste) {
-        let mut paste = nsh_core::PasteEvent::new(text.clone().unwrap_or_default());
+        paste.html = crate::system::clipboard_html().unwrap_or_default();
         if let Some(image) = crate::system::clipboard_image() {
             paste.files.push(nsh_core::PastedFile::image(image));
         }
         paste.uris = crate::system::clipboard_files();
+    }
+    paste_content(surface, view, input, paste);
+}
+
+/// Pastes `paste` into `view` as the user's paste of it does: reports it
+/// (`onPaste`) if the app listens, then inserts its text as
+/// `pasteBehavior` says.
+fn paste_content(
+    surface: &Surface,
+    view: &NshView,
+    input: &InputState,
+    paste: nsh_core::PasteEvent,
+) {
+    let text = paste.text.clone();
+    if view.state().events.contains(EventKind::Paste) {
         surface.event(
             view.id(),
             EventKind::Paste,
@@ -2640,14 +2653,27 @@ fn paste(surface: &Surface, view: &NshView, input: &InputState) {
     if input.config.borrow().paste_behavior != nsh_core::PasteBehavior::Insert {
         return;
     }
-    let Some(text) = text else {
-        return;
-    };
     let text = pasted(&text, input.multiline());
     if !text.is_empty() {
         replace_selection(input, &text.replace('\n', "\r"));
         process(surface, view, input);
     }
+}
+
+/// The test agent's paste of `content` into the focused input, without
+/// the system's clipboard.
+#[cfg(feature = "dev")]
+pub(crate) fn paste_focused(
+    surface: &Surface,
+    content: nsh_core::PasteEvent,
+) -> Result<(), String> {
+    let view = focused(surface).ok_or("no focused input to paste into")?;
+    let input = input_of(&view).ok_or("the focused view is no input")?;
+    if !input.config.borrow().editable {
+        return Err("the focused input is read-only".into());
+    }
+    paste_content(surface, &view, &input, content);
+    Ok(())
 }
 
 // --- The caret's blinking ----------------------------------------------------
@@ -2774,6 +2800,52 @@ mod tests {
             let (min, max, _, _) = editor.vscroll();
             assert!(max - min > 80, "vertical overflow missing: {min}..{max}");
         }
+    }
+
+    /// The wheel's limit reaches the last line: scrolled there, the text's
+    /// end sits inside the client rectangle and no further scroll moves it
+    /// (#3200: the limit stopped about halfway at HiDPI).
+    #[test]
+    fn wheel_limit_reaches_the_last_line() {
+        let config = InputConfig {
+            multiline: true,
+            ..Default::default()
+        };
+        let client = RECT {
+            right: 420,
+            bottom: 160,
+            ..Default::default()
+        };
+        let editor = Editor::new(
+            HWND::default(),
+            Props {
+                client,
+                bits: base_bits(&config),
+                scroll: scroll_flags(&config),
+                ..Default::default()
+            },
+            Box::new(|| {}),
+            Box::new(|| {}),
+        )
+        .expect("RichEdit");
+        let text: Vec<String> = (1..=40)
+            .map(|i| format!("line {i:02}  abcdefghij"))
+            .collect();
+        editor.set_text(&text.join("\r\n"));
+        editor.send(0x00BA, 0, 0); // EM_GETLINECOUNT forces text layout.
+        let limit = editor.scroll_limit();
+        assert!(limit > client.bottom, "no overflow: {limit}");
+        let mut at = windows::Win32::Foundation::POINT { x: 0, y: limit };
+        editor.send(EM_SETSCROLLPOS, 0, &mut at as *mut _ as isize);
+        let mut now = windows::Win32::Foundation::POINT::default();
+        editor.send(EM_GETSCROLLPOS, 0, &mut now as *mut _ as isize);
+        assert_eq!(now.y, limit, "RichEdit clamped short of the limit");
+        let len = editor.text_units().len() as u32;
+        let last = editor.position(len);
+        assert!(
+            last.y >= client.top && last.y < client.bottom,
+            "the last line is not in view at the limit: {last:?}"
+        );
     }
 
     /// Several lines are as far apart as the line height says, the same

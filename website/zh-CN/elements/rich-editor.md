@@ -213,6 +213,8 @@ const canIndent = editor.can(sinkListItem("listItem"));
 | `on(event, listener)` | 每次发生 `event` 后，在 JS 的下一轮以它的数据调用 `listener`：`revision`（`{ revision }`，每次修改之后，无论来自何处）、`update`、`selectionUpdate`、`transaction`、`focus`、`blur`、`delete`。返回一个停止监听的函数；在组件渲染期间添加的监听器随组件一起停止 |
 | `focus()`、`blur()` | 把键盘焦点移到显示编辑器的视图，或从中移开 |
 
+`insertContent` 收到文本、Markdown 或 JSON 时，内容会在边缘打开并适配插入位置：光标位于文本中时，一个段落会拼接进光标前后的文本；列表、表格等无法内联放入的结构仍作为块插入。HTML 字符串遵循 Tiptap 的 `insertContent`：裸文本或内联标记拼进文本，显式的块元素作为块插入。
+
 位置的计算与 ProseMirror 相同：文本按 UTF-16 码元计数，叶子节点计为一，有内容的节点计其两个边界。需要在编辑后仍然有效的东西，在节点属性或标记中保存一个 id。位置查询（`resolve(pos)`、`nodeAt(pos)`、`coordsAtPos(pos)`、`findParentNode(name, pos)` 等）在位置超出文档（`0` 到 `doc.content.size`）时抛出 `RangeError`，与 ProseMirror 的 `resolve` 相同；那里没有东西时回答 `null`（`nodeAt` 在节点末尾，`coordsAtPos` 在没有视图显示编辑器时）。`run` 和 `can` 遇到编辑器不认识的命令、节点或标记类型时抛出 `TypeError`。
 
 ### 接管事务
@@ -267,7 +269,7 @@ const editor = createRichEditor({ extensions: [StarterKit, Signature.configure({
 
 ### 节点视图
 
-`addNodeView` 返回一个组件，由它渲染该扩展节点类型的每个节点：正文里的股票标签、段落之间的卡片、@ 提及、嵌入内容。节点类型必须是原子节点（`atom: true` 或叶子节点）：光标把它当作一个字符或一个块跳过，Backspace 删除它。有内容的节点会被拒绝。
+`addNodeView` 返回一个组件，由它渲染该扩展节点类型的每个节点：正文里的股票标签、段落之间的卡片、@ 提及、嵌入内容。节点类型必须是原子节点（`atom: true` 或叶子节点）：方向键移到它时先把它作为节点选中，再按一次才越过它，与 ProseMirror 和 Tiptap 相同（`selectable: false` 的节点，如 @ 提及，被当作一个字符跳过），Backspace 删除它。有内容的节点会被拒绝。
 
 ```tsx
 import { RichEditor, StarterKit, createRichEditor, defineExtension, type RichNodeViewProps } from "nsh/base";
@@ -367,9 +369,9 @@ const paste = new RichEditorPlugin("paste")
 
 应用自己清洗剪贴板里的 HTML（Word 的列表、Google Docs 的外壳、转成 HTML 的 Markdown）时，用 `editor.pasteHTML(html)`
 把结果接着粘贴进去并返回 `true`；纯文本用 `editor.pasteText(text)`。它们就是 ProseMirror 的 `pasteHTML` 和 `pasteText`：
-内容按粘贴的方式读取，即按 schema 的规则解析并适配选区，所以标了 `isolating` 的节点（带图注的图片）会完整保留，而
-`insertContent(html, "html")` 会把它打开；编辑器自己的粘贴步骤（链接、字数限制、粘贴规则）照常生效。插件的 `transformPasted`
-和 `handlePaste` 不会再被调用。返回值表示是否粘贴了内容。
+内容按粘贴的方式读取，即按 schema 的规则解析并适配选区，所以标了 `isolating` 的节点（带图注的图片）会完整保留；
+相比之下，传给 `insertContent` 的 JSON 或 Markdown 会在内容边缘打开，即使穿过这样的节点也一样。编辑器自己的粘贴步骤
+（链接、字数限制、粘贴规则）照常生效。插件的 `transformPasted` 和 `handlePaste` 不会再被调用。返回值表示是否粘贴了内容。
 
 ```tsx
 const paste = new RichEditorPlugin("paste").handlePaste((_slice, clipboard) => {

@@ -747,7 +747,7 @@ pub(super) struct Components {
     styles: FxHashMap<StyleRefinement, std::rc::Rc<ClassList>>,
     /// The styles a component on another's host gets from each above it,
     /// merged (by the lists', which the entry keeps).
-    merges: FxHashMap<(usize, usize), [std::rc::Rc<ClassList>; 3]>,
+    pub(super) merges: FxHashMap<(usize, usize), [std::rc::Rc<ClassList>; 3]>,
     /// While a view's slot content is matched: the nested component's host
     /// and the slot (its regions are the slot's).
     pub(super) filling: Option<(NodeId, &'static str)>,
@@ -1744,6 +1744,13 @@ impl<M: TextEngine> Core<M> {
         self.components.executor.quitting.get() > 0
     }
 
+    /// Whether a JS call of an `async fn` into Rust (a native module's, a
+    /// class's) has not answered yet: its answer comes from elsewhere (a
+    /// request made in Rust, another thread), which nothing else counts.
+    pub fn async_calls_pending(&self) -> bool {
+        self.components.executor.calls.get() > 0
+    }
+
     /// Runs the closures that waited for the app's answer to the events
     /// handed to JS before this commit ([`crate::element::after_answer`]),
     /// each under its owner; one whose owner went is dropped unrun.
@@ -1958,6 +1965,10 @@ impl<M: TextEngine> Core<M> {
                 child,
                 before,
             } if self.is_host(parent) => {
+                // A raw text run (`<Button>Open</Button>`) has no node
+                // until a use needs one: the view places it, so it does.
+                let run = self.runs.contains_key(&child);
+                self.materialize_run(child)?;
                 self.key(child)?;
                 let inst = self.components.instances.get_mut(&parent).expect("host");
                 let was_empty = inst.js_children.is_empty();
@@ -1983,7 +1994,18 @@ impl<M: TextEngine> Core<M> {
                             parent: p,
                             child,
                             before: at.and(before).or(anchor),
-                        })?
+                        })?;
+                        if run
+                            && self
+                                .key(p)
+                                .is_ok_and(|k| self.nodes[k as usize].kind != Kind::Text)
+                        {
+                            let text = self.key(child).map_or("", |k| &self.nodes[k as usize].text);
+                            log::warn!(
+                                target: "js",
+                                "text in a component's children is not shown: text shows in a <Text> (`<Text>{text}</Text>`)"
+                            );
+                        }
                     }
                     Placement::Nested(nested, anchor) => {
                         let anchor = self.anchor_node(anchor);
@@ -2302,12 +2324,15 @@ impl<M: TextEngine> Core<M> {
             RustCall::Task(start) => match caught(start) {
                 Ok(future) => {
                     let executor = Rc::downgrade(&self.components.executor);
+                    let pending =
+                        crate::element::quit::Pending::new(&self.components.executor.calls);
                     // A task of the root: it never goes away.
                     crate::element::task::spawn_raw(
                         &self.components.executor,
                         ROOT_ID,
                         Box::pin(async move {
                             let result = crate::element::module::catching(future).await;
+                            drop(pending);
                             match executor.upgrade() {
                                 Some(executor) if call != 0 => {
                                     executor.act(Action::Return(call, result));
@@ -3655,12 +3680,7 @@ impl<M: TextEngine> Core<M> {
             Some(self.components.lowered(style))
         };
         if !same(&own, &old.0) || !same(&user, &old.1) {
-            let list = match (&own, &user) {
-                (Some(a), Some(b)) => Some(std::rc::Rc::new(a.merged(b))),
-                (Some(a), None) => Some(a.clone()),
-                (None, Some(b)) => Some(b.clone()),
-                (None, None) => None,
-            };
+            let list = self.merge_user(own.clone(), user.clone());
             if let Ok(key) = self.key(id) {
                 self.set_class_list(key, list);
             }
@@ -8292,15 +8312,15 @@ impl<M: TextEngine> Core<M> {
         drop(keys);
         // JS's first, then the views', where the newest that may fire wins:
         // a focused component's keys win over the app's. Bindings
-        // `over_focused` come after both, so they win over the components';
+        // `OverFocused::Always` come after both, so they win over the components';
         // the overlay's Escape (a popup closing) stays last.
         let js = self.components.js_keymap.bindings();
         let bindings = js
             .iter()
-            .filter(|b| !b.over_focused)
-            .chain(views.iter().filter(|b| !b.over_focused))
-            .chain(js.iter().filter(|b| b.over_focused))
-            .chain(views.iter().filter(|b| b.over_focused))
+            .filter(|b| !b.comes_after_views())
+            .chain(views.iter().filter(|b| !b.comes_after_views()))
+            .chain(js.iter().filter(|b| b.comes_after_views()))
+            .chain(views.iter().filter(|b| b.comes_after_views()))
             .copied()
             .chain(overlay)
             .collect();
@@ -8333,9 +8353,27 @@ impl<M: TextEngine> Core<M> {
         safe
     }
 
+    /// Whether `key` or a view around it already stands clear of the
+    /// software keyboard (`Prop::ClearsKeyboard`, a bottom sheet the
+    /// keyboard lifts): the keyboard takes nothing more from it.
+    fn clears_keyboard(&self, key: super::Key) -> bool {
+        let mut key = key;
+        loop {
+            let node = &self.nodes[key as usize];
+            if node.clears_keyboard {
+                return true;
+            }
+            if node.parent == NO_KEY {
+                return false;
+            }
+            key = node.parent;
+        }
+    }
+
     /// What `env` (a node's `env()` terms) comes to for `key` now: the
     /// insets of the root view it renders in ([`Self::insets_of`]) and the
-    /// software keyboard's height.
+    /// software keyboard's height, 0 where a view around it stands clear
+    /// of the keyboard already ([`Self::clears_keyboard`]).
     pub(super) fn env_insets(
         &self,
         key: super::Key,
@@ -8348,6 +8386,9 @@ impl<M: TextEngine> Core<M> {
                 return Points::ZERO;
             };
             if var == EnvVar::KeyboardInsetHeight {
+                if self.clears_keyboard(key) {
+                    return Points::ZERO;
+                }
                 return self
                     .components
                     .environment
