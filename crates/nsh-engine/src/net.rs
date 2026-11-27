@@ -600,13 +600,20 @@ mod tests {
         // allow_non_standard_methods(true). Verify a PROPFIND round-trips.
         let base = serve(|s, _line, headers| {
             assert_eq!(values(headers, "depth"), ["0"]);
-            respond(s, "207 Multi-Status", b"<?xml version=\"1.0\"?><D:multistatus xmlns:D=\"DAV:\"/>");
+            respond(
+                s,
+                "207 Multi-Status",
+                b"<?xml version=\"1.0\"?><D:multistatus xmlns:D=\"DAV:\"/>",
+            );
         });
         let mut r = request("PROPFIND", &base);
         r.headers = vec![("Depth".into(), "0".into())];
         let (_task, rx) = start(r);
         let (head, body) = response(&rx);
-        assert_eq!(head.status, 207, "PROPFIND should reach the server and get 207");
+        assert_eq!(
+            head.status, 207,
+            "PROPFIND should reach the server and get 207"
+        );
         assert!(String::from_utf8_lossy(&body).contains("DAV:"));
     }
 
