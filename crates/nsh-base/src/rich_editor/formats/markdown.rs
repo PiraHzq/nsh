@@ -10,7 +10,10 @@
 //! is written as a pipe table; any other is written as its HTML, which
 //! reads back as it was.
 
-use std::{cell::Cell, collections::BTreeSet};
+use std::{
+    cell::Cell,
+    collections::{BTreeSet, HashMap},
+};
 
 use markdown::mdast;
 use serde_json::Value;
@@ -72,6 +75,10 @@ pub struct MarkdownNames {
     pub task_item: String,
     /// A task item's checked attribute (`checked`).
     pub task_checked: String,
+    /// A footnote reference (`footnoteReference`), written as `[^label]`.
+    pub footnote_reference: String,
+    /// A footnote definition (`footnoteDefinition`).
+    pub footnote_definition: String,
 }
 
 impl Default for MarkdownNames {
@@ -98,12 +105,14 @@ impl Default for MarkdownNames {
             task_list: "taskList".into(),
             task_item: "taskItem".into(),
             task_checked: "checked".into(),
+            footnote_reference: "footnoteReference".into(),
+            footnote_definition: "footnoteDefinition".into(),
         }
     }
 }
 
 impl MarkdownNames {
-    fn node_names(&self) -> [&str; 12] {
+    fn node_names(&self) -> [&str; 13] {
         [
             &self.paragraph,
             &self.heading,
@@ -117,11 +126,18 @@ impl MarkdownNames {
             &self.list_item,
             &self.task_list,
             &self.task_item,
+            &self.footnote_definition,
         ]
     }
 
-    fn mark_names(&self) -> [&str; 4] {
-        [&self.strong, &self.emphasis, &self.code, &self.link]
+    fn mark_names(&self) -> [&str; 5] {
+        [
+            &self.strong,
+            &self.emphasis,
+            &self.code,
+            &self.link,
+            &self.footnote_reference,
+        ]
     }
 }
 
@@ -189,12 +205,15 @@ impl DocFormat for MarkdownFormat {
         let root = markdown::to_mdast(input, &markdown::ParseOptions::gfm())
             .map(Mdast)
             .map_err(|e| FormatError::Markdown(e.to_string()))?;
+        let footnotes = FootnoteIndex::collect(&root);
         let reader = Reader {
             schema,
             names: &self.names,
             depth: Cell::new(0),
+            footnotes: &footnotes,
         };
         let mut blocks = reader.blocks(root.children().map(Vec::as_slice).unwrap_or(&[]))?;
+        reader.append_footnotes(&mut blocks)?;
         if blocks.is_empty() {
             blocks.push(reader.node(&self.names.paragraph, Attrs::new(), Vec::new())?);
         }
@@ -231,6 +250,55 @@ struct Reader<'a> {
     /// How many `blocks` / `inlines` are being read around the current
     /// node ([`MAX_DEPTH`]).
     depth: Cell<usize>,
+    /// Footnote definitions and the order in which references first use them.
+    footnotes: &'a FootnoteIndex,
+}
+
+/// Footnotes found in one mdast tree. Definitions are emitted at the end of
+/// the document in the order their references first appear, as GitHub does.
+#[derive(Default)]
+struct FootnoteIndex {
+    order: Vec<String>,
+    definitions: HashMap<String, Vec<mdast::Node>>,
+    numbers: HashMap<String, usize>,
+}
+
+impl FootnoteIndex {
+    fn collect(root: &mdast::Node) -> Self {
+        let mut index = Self::default();
+        Self::visit(root, &mut index);
+        for (number, id) in index.order.iter().enumerate() {
+            index.numbers.insert(id.clone(), number + 1);
+        }
+        index
+    }
+
+    fn visit(node: &mdast::Node, index: &mut Self) {
+        match node {
+            mdast::Node::FootnoteReference(reference) => {
+                if !index.numbers.contains_key(&reference.identifier)
+                    && !index.order.contains(&reference.identifier)
+                {
+                    index.order.push(reference.identifier.clone());
+                }
+            }
+            mdast::Node::FootnoteDefinition(definition) => {
+                index
+                    .definitions
+                    .insert(definition.identifier.clone(), definition.children.clone());
+            }
+            _ => {}
+        }
+        if let Some(children) = node.children() {
+            for child in children {
+                Self::visit(child, index);
+            }
+        }
+    }
+
+    fn number(&self, identifier: &str) -> Option<usize> {
+        self.numbers.get(identifier).copied()
+    }
 }
 
 /// How deep blocks and inline content are read: deeper content is its text.
@@ -264,6 +332,29 @@ impl Reader<'_> {
 
     fn paragraph(&self, inline: Vec<Node>) -> Result<Node, FormatError> {
         self.node(&self.names.paragraph, Attrs::new(), inline)
+    }
+
+    /// Append footnotes as blocks of their own. A schema without a
+    /// `footnoteDefinition` node keeps the old behavior: their children were
+    /// read where the definition stood.
+    fn append_footnotes(&self, blocks: &mut Vec<Node>) -> Result<(), FormatError> {
+        if !self.has_node(&self.names.footnote_definition) {
+            return Ok(());
+        }
+        for (number, id) in self.footnotes.order.iter().enumerate() {
+            let Some(children) = self.footnotes.definitions.get(id) else {
+                continue;
+            };
+            let mut inner = self.blocks(children)?;
+            if inner.is_empty() {
+                inner.push(self.paragraph(Vec::new())?);
+            }
+            let mut attrs = Attrs::new();
+            attrs.insert("label".into(), Value::from(id.as_str()));
+            attrs.insert("index".into(), Value::from((number + 1) as u64));
+            blocks.push(self.node(&self.names.footnote_definition, attrs, inner)?);
+        }
+        Ok(())
     }
 
     fn blocks(&self, nodes: &[mdast::Node]) -> Result<Vec<Node>, FormatError> {
@@ -393,6 +484,9 @@ impl Reader<'_> {
                 let text = self.text(&h.value, Vec::new());
                 out.push(self.paragraph(text)?);
             }
+            // Definitions are appended once at the end, numbered by first
+            // reference; leaving them in place would scatter their blocks.
+            mdast::Node::FootnoteDefinition(_) => {}
             other => match other.children() {
                 // Containers the schema does not know (tables, footnotes)
                 // keep their blocks; what has no children keeps its text.
@@ -498,6 +592,17 @@ impl Reader<'_> {
         match node {
             mdast::Node::Text(t) => out.extend(self.text(&t.value, marks.to_vec())),
             mdast::Node::Html(h) => out.extend(self.text(&h.value, marks.to_vec())),
+            mdast::Node::FootnoteReference(reference) => {
+                let number = self
+                    .footnotes
+                    .number(&reference.identifier)
+                    .unwrap_or_else(|| self.footnotes.order.len() + 1);
+                let mut attrs = Attrs::new();
+                attrs.insert("label".into(), Value::from(reference.identifier.as_str()));
+                attrs.insert("index".into(), Value::from(number as u64));
+                let marks = self.with_mark(marks, &n.footnote_reference, attrs);
+                out.extend(self.text(&number.to_string(), marks));
+            }
             mdast::Node::InlineCode(c) => {
                 let marks = self.with_mark(marks, &n.code, Attrs::new());
                 out.extend(self.text(&c.value, marks));
@@ -636,6 +741,22 @@ impl Writer<'_> {
             "---".into()
         } else if name == n.bullet_list || name == n.ordered_list || name == n.task_list {
             self.list(node, name == n.ordered_list)
+        } else if name == n.footnote_definition {
+            let label = node
+                .attrs()
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let content = self.blocks(node);
+            let mut lines = content.lines();
+            let first = lines.next().unwrap_or_default().to_owned();
+            let rest: Vec<String> = lines.map(str::to_owned).collect();
+            let mut out = format!("[^{label}]: {first}");
+            for line in rest {
+                out.push_str("\n    ");
+                out.push_str(&line);
+            }
+            out
         } else if table_role(node.ty()) == Some(TableRole::Table) {
             self.table(node)
         } else if node.is_textblock() {
@@ -771,6 +892,10 @@ impl Writer<'_> {
                 })
                 .cloned()
                 .collect();
+            let footnote = child
+                .marks()
+                .iter()
+                .find(|m| m.ty.name() == n.footnote_reference);
             let code = child.marks().iter().any(|m| m.ty.name() == n.code);
             // Marks already open stay open: they go first, so `*a **b***`
             // does not close and reopen the emphasis around `b`.
@@ -790,7 +915,11 @@ impl Writer<'_> {
                 }
                 out.push_str(&ws);
             }
-            let content = if let Some(text) = child.text() {
+            let content = if footnote.is_some() {
+                // The mark writes the whole `[^label]`, so the displayed
+                // number must not appear twice in the Markdown source.
+                String::new()
+            } else if let Some(text) = child.text() {
                 if code {
                     code_span(text)
                 } else {
@@ -848,6 +977,13 @@ impl Writer<'_> {
             "*".into()
         } else if name == n.strike {
             "~~".into()
+        } else if name == n.footnote_reference {
+            let label = mark
+                .attrs
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            format!("[^{label}]")
         } else if name == n.link {
             "[".into()
         } else {
@@ -856,7 +992,11 @@ impl Writer<'_> {
     }
 
     fn close(&self, mark: &Mark) -> String {
-        if mark.ty.name() == self.names.link {
+        let name = mark.ty.name();
+        let n = self.names;
+        if name == n.footnote_reference {
+            String::new()
+        } else if name == self.names.link {
             let attr = |k: &str| {
                 mark.attrs
                     .get(k)
