@@ -1,8 +1,5 @@
 //! GTK file-list drops, routed through the surface's existing hit testing.
-use std::{
-    cell::RefCell,
-    rc::Rc,
-};
+use std::{cell::RefCell, rc::Rc};
 
 use gtk4::{self as gtk, gdk, glib, prelude::*};
 use nsh_core::{EventKind, EventPayload, NodeId};
@@ -388,8 +385,8 @@ mod tests {
             assert_eq!(surface.file_drop.controllers.borrow().len(), 2);
 
             let window_controller = surface.file_drop.controllers.borrow()[1].1.clone();
-            let files = gdk::FileList::from_array(&[gtk::gio::File::for_path("/tmp/doc.txt")])
-                .to_value();
+            let files =
+                gdk::FileList::from_array(&[gtk::gio::File::for_path("/tmp/doc.txt")]).to_value();
 
             // `surface.root` itself does not accept drops, but `window_root` does.
             assert!(!update(&surface, &surface.root, 10.0, 10.0));
